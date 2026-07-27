@@ -13,6 +13,9 @@ Archive: online SIMS/SMS experiement processing pipeline
 
 1. Start the DAQ device (RIGOL 4-channel RF DAQ system). Run `data_looper.py` to cut the .data files based on injection and save them into PSD data files or/and pictures.
 
+* make sure `preprocessing.py` and `data_looper.py` are in the same folder.
+* `Ctrl + C` is the hotkey for quitting the program.
+
 ```Python
 # --- configures ---
 SOURCE_DIR = '/'  				# path for raw IQ data files
