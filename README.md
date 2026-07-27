@@ -7,6 +7,7 @@ Archive: online SIMS/SMS experiement processing pipeline
 * Multi-process, multi-thread: `multiprocessing`, `concurrent.futures`
 * Sci-calculation: `scipy`, `numpy`, `pyfftw`
 * Plots: `matplotlib`
+* Tables/DataFrame: `pandas`
 * GUI: `pyQt5`, `pyqtgraph`
 
 ## Usage
@@ -44,4 +45,20 @@ if __name__ == '__main__':
     processor.run(WIN_LEN, N_AVER, OVERLAPR, N_HOP, TODO)
 ``` 
 
+2. Run `human_recognition.py`, visually inspect each injection to determine whether any ion signals are present. (option)
+
+* manual steps, in preparation for the subsequent use of CNN to automatically identifiy ion peaks.
+* hit `0` for no signal, `1` otherwise.
+* hit `q` for quit.
+
+```Python
+# --- configures ---
+DATA_DIR = '/'  # path for injection .npz 
+OUTPUT_CSV = 'labels.csv'    # output file's path with filename
+
+# --- run: human_recognition.py ---
+from human_recognition import DataLabeler
+if __name__ == "__main__":
+    labeler = DataLabeler(DATA_DIR, OUTPUT_CSV)
+```
 
