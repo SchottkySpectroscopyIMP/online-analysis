@@ -62,3 +62,22 @@ if __name__ == "__main__":
     labeler = DataLabeler(DATA_DIR, OUTPUT_CSV)
 ```
 
+3. Extracting ion information from data
+
+> Method 1 (via `CERN-ROOT`): employ $\mu + 3 \sigma$ to separate background and ion signal, ...
+
+* Requirements for input ...
+* Output ...
+
+```C++
+// how to do
+```
+
+> Method 2 (via `Python 3`): employ CNN to distinguish ion signal, use CWT to reconstruct spectrum with pure ion signal from estimated baseline
+
+* Needed results from `human_recognition.py` for CNN. But not necessary to do this every time. Only if the current data differs significantly from the previous training set (for example, if the resonance peaks are significantly offset) is it necessary to repeat the process.
+* If there is at least one ion in the .data file, a corresponding .csv result will be generated.
+
+```Python
+# how to do
+```
