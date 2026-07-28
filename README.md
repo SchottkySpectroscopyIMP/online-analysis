@@ -1,5 +1,5 @@
 # online-analysis
-Archive: online SIMS/SMS experiement processing pipeline
+Archive: online SIMS/SMS experiment processing pipeline
 
 ## Requisites
 
