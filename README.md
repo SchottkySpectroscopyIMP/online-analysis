@@ -81,3 +81,12 @@ if __name__ == "__main__":
 ```Python
 # how to do
 ```
+
+4. Tool for showing result
+
+* `.csv` from step 3 is needed for `Data file`. `.csv` from PID result is needed for `Ref. file`.
+* GMM can be used to distinguish different ion species from ion clusters.
+
+```Shell
+> python ion_monitor.py
+```
