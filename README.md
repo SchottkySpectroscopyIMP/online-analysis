@@ -5,7 +5,7 @@ Archive: online SIMS/SMS experiment processing pipeline
 
 * Language environment: `Python 3`
 * Multi-process, multi-thread: `multiprocessing`, `concurrent.futures`
-* Sci-calculation: `scipy`, `numpy`, `pyfftw`
+* Sci-calculation: `scipy`, `numpy`, `pyfftw`, `sklearn`
 * Plots: `matplotlib`
 * Tables/DataFrame: `pandas`
 * GUI: `pyQt5`, `pyqtgraph`
