@@ -7,10 +7,11 @@ import pandas as pd
 import pyqtgraph as pg
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QStatusBar, 
                             QPushButton, QMessageBox, QDoubleSpinBox, QLineEdit, QFileDialog,
-                             QHBoxLayout, QSpinBox, QLabel, QGroupBox, QGridLayout)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject
+                             QHBoxLayout, QSpinBox, QLabel, QGroupBox, QGridLayout, QCompleter, QRadioButton)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, QStringListModel
 from sklearn.mixture import GaussianMixture
 from scipy.spatial.distance import cdist
+from scipy.optimize import curve_fit
 
 class Worker(QObject):
     # 定义一个信号用来将计算结果传回主线程
@@ -30,6 +31,10 @@ class Worker(QObject):
         mask = (self.df['peak_pos']>x0) & (self.df['peak_pos']<x1) & (self.df['height_ion']>y0) & (self.df['height_ion']<y1)
         subset = self.df.loc[mask, ['peak_pos', 'height_ion']]
         filtered_data = subset.values
+
+        if len(filtered_data) == 0:
+            self.result_ready.emit(self.df['ion'].values, self.df['harmonic'].values)
+            return
 
         # 准备初始值
         y_init = np.mean(filtered_data[:,1])
@@ -52,11 +57,207 @@ class Worker(QObject):
 
         self.result_ready.emit(self.df['ion'].values, self.df['harmonic'].values)
 
+
+# 双 X 轴 sigma f/f 绘图与拟合控制窗口（修复上 X 轴刻度物理数值映射）
+class SigmaPlotWindow(QMainWindow):
+    def __init__(self, summary_df):
+        super().__init__()
+        self.setWindowTitle("sigma f/f vs m/q & gamma")
+        self.resize(1000, 600)
+        self.summary_df = summary_df
+
+        # 状态栏
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        self.coord_label = QLabel("m/q: 0.0000, gamma: 0.0000, sigma f/f: 0.000000")
+        self.status_bar.addPermanentWidget(self.coord_label)
+
+        # 布局构建
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QHBoxLayout(central_widget)
+
+        # 左侧：绘图控件
+        self.plot_widget = pg.PlotWidget()
+        main_layout.addWidget(self.plot_widget, stretch=4)
+
+        # 右侧：拟合控制面板
+        fit_group = QGroupBox("Fitting Control")
+        fit_layout = QGridLayout()
+
+        fit_layout.addWidget(QLabel("γt:"), 0, 0)
+        self.spin_gammat = QDoubleSpinBox()
+        self.spin_gammat.setRange(0.0001, 1000.0)
+        self.spin_gammat.setValue(1.43)
+        self.spin_gammat.setDecimals(4)
+        self.spin_gammat.setSingleStep(0.01)
+        fit_layout.addWidget(self.spin_gammat, 0, 1)
+
+        fit_layout.addWidget(QLabel("ΔΒρ/Βρ (%):"), 1, 0)
+        self.spin_dbrp = QDoubleSpinBox()
+        self.spin_dbrp.setRange(0.0001, 1000.0)
+        self.spin_dbrp.setValue(0.3)
+        self.spin_dbrp.setDecimals(4)
+        self.spin_dbrp.setSingleStep(0.01)
+        fit_layout.addWidget(self.spin_dbrp, 1, 1)
+
+        self.btn_fit = QPushButton("run fitting")
+        fit_layout.addWidget(self.btn_fit, 2, 0, 1, 2)
+
+        fit_group.setLayout(fit_layout)
+        main_layout.addWidget(fit_group, stretch=1)
+
+        self.btn_fit.clicked.connect(self.run_fitting)
+
+        # 初始化图表
+        self.init_plot()
+
+    def init_plot(self):
+        self.p_main = self.plot_widget.getPlotItem()
+        self.p_main.showGrid(x=True, y=True, alpha=0.3)
+        self.p_main.setLabel('bottom', 'm/q')
+        self.p_main.setLabel('left', 'sigma f / f')
+
+        # 提取数据真实极值范围，用于建立 m/q 与 gamma 的独立物理映射
+        self.mq_min = self.summary_df['m/q'].min()
+        self.mq_max = self.summary_df['m/q'].max()
+        self.gamma_min = self.summary_df['gamma'].min()
+        self.gamma_max = self.summary_df['gamma'].max()
+
+        if self.mq_max == self.mq_min:
+            self.mq_max += 1.0
+        if self.gamma_max == self.gamma_min:
+            self.gamma_max += 1.0
+
+        # 创建顶部 ViewBox 与顶部 X 轴 (gamma)
+        self.vb_top = pg.ViewBox()
+        self.p_main.scene().addItem(self.vb_top)
+        self.axis_top = pg.AxisItem('top')
+        self.axis_top.setLabel('gamma')
+        self.p_main.layout.addItem(self.axis_top, 1, 1)
+        self.axis_top.linkToView(self.vb_top)
+        self.vb_top.setYLink(self.p_main.vb)
+
+        # 保持几何区域对齐
+        def update_views():
+            self.vb_top.setGeometry(self.p_main.vb.sceneBoundingRect())
+
+        # 根据主 ViewBox (m/q) 的范围变化，实时映射顶部 ViewBox (gamma) 的真实范围
+        def update_top_x_range():
+            x0, x1 = self.p_main.vb.viewRange()[0]
+            g0 = self.mq_to_gamma(x0)
+            g1 = self.mq_to_gamma(x1)
+            self.vb_top.setXRange(g0, g1, padding=0)
+
+        self.p_main.vb.sigResized.connect(update_views)
+        self.p_main.vb.sigXRangeChanged.connect(update_top_x_range)
+
+        # 鼠标移动显示坐标
+        self.p_main.scene().sigMouseMoved.connect(self.on_mouse_moved)
+
+        # 绘制散点数据
+        self.plot_data()
+
+    def mq_to_gamma(self, mq):
+        """m/q 到 gamma 的线性换算函数"""
+        return self.gamma_min + (mq - self.mq_min) * (self.gamma_max - self.gamma_min) / (self.mq_max - self.mq_min)
+
+    def plot_data(self):
+        if self.summary_df.empty:
+            return
+
+        mq_vals = self.summary_df['m/q'].values
+        gamma_vals = self.summary_df['gamma'].values
+        y_vals = self.summary_df['rel_sigma'].values
+        ions = self.summary_df['ion'].values
+
+        # 1. 底部 ViewBox (m/q vs sigma f/f) 绘制散点及标签
+        scatter_bottom = pg.ScatterPlotItem(
+            x=mq_vals, y=y_vals, size=12, symbol='o', 
+            brush=pg.mkBrush('cyan'), pen=pg.mkPen('w', width=1)
+        )
+        self.p_main.addItem(scatter_bottom)
+
+        for x, y, ion in zip(mq_vals, y_vals, ions):
+            text_item = pg.TextItem(text=str(ion), color='yellow', anchor=(0.5, 1.2))
+            text_item.setPos(x, y)
+            self.p_main.addItem(text_item)
+
+        # 2. 顶部 ViewBox (gamma vs sigma f/f) 绘制对应散点
+        scatter_top = pg.ScatterPlotItem(
+            x=gamma_vals, y=y_vals, size=10, symbol='t1', 
+            brush=pg.mkBrush('magenta'), pen=pg.mkPen('w', width=1)
+        )
+        self.vb_top.addItem(scatter_top)
+
+        # 设置主视口的范围，触发自动映射更新顶部 view
+        dmq = self.mq_max - self.mq_min
+        self.p_main.setXRange(self.mq_min - 0.1 * dmq, self.mq_max + 0.1 * dmq)
+
+    def on_mouse_moved(self, evt):
+        pos = evt
+        if self.p_main.vb.sceneBoundingRect().contains(pos):
+            pt_bottom = self.p_main.vb.mapSceneToView(pos)
+            pt_top = self.vb_top.mapSceneToView(pos)
+            self.coord_label.setText(
+                f"m/q: {pt_bottom.x():.4f}, gamma: {pt_top.x():.4f}, sigma f/f: {pt_bottom.y():.6e}"
+            )
+
+    def run_fitting(self):
+        self.spin_gammat.setEnabled(False)
+        self.spin_dbrp.setEnabled(False)
+        self.btn_fit.setEnabled(False)
+
+        try:
+            init_gammat = self.spin_gammat.value()
+            init_dbrp = self.spin_dbrp.value()
+
+            x_data = self.summary_df['gamma'].values
+            y_data = self.summary_df['rel_sigma'].values
+
+            # 拟合公式: y = |1/x^2 - 1/γt^2| * ΔΒρ/Βρ * 0.01
+            def fit_func(x, g_t, d_brp):
+                return np.abs(1.0 / (x**2) - 1.0 / (g_t**2)) * d_brp * 0.01
+
+            popt, _ = curve_fit(fit_func, x_data, y_data, p0=[init_gammat, init_dbrp], maxfev=5000)
+            
+            fit_g_t, fit_d_brp = popt[0], popt[1]
+
+            # 覆盖写入输入框
+            self.spin_gammat.setValue(float(fit_g_t))
+            self.spin_dbrp.setValue(float(fit_d_brp))
+
+            # 清理旧的拟合曲线
+            if hasattr(self, 'fit_curve') and self.fit_curve in self.vb_top.addedItems:
+                self.vb_top.removeItem(self.fit_curve)
+
+            # 绘制新拟合曲线 (基于 gamma X 轴，添加到 vb_top)
+            x_min, x_max = x_data.min(), x_data.max()
+            dx = (x_max - x_min) if x_max != x_min else 1.0
+            x_fit = np.linspace(x_min - 0.2 * dx, x_max + 0.2 * dx, 300)
+            y_fit = fit_func(x_fit, fit_g_t, fit_d_brp)
+
+            self.fit_curve = pg.PlotCurveItem(x_fit, y_fit, pen=pg.mkPen('r', width=2, style=Qt.SolidLine))
+            self.vb_top.addItem(self.fit_curve)
+
+            self.status_bar.showMessage(f"Fitting succeeded: γt = {fit_g_t:.4f}, ΔΒρ/Βρ = {fit_d_brp:.4f}%", 5000)
+
+        except Exception as e:
+            self.status_bar.showMessage(f"Fitting failed: {str(e)}", 5000)
+
+        finally:
+            self.spin_gammat.setEnabled(True)
+            self.spin_dbrp.setEnabled(True)
+            self.btn_fit.setEnabled(True)
+
+
 class FastLargeDataPlotter(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Large Scale Data Visualization")
         self.resize(1400, 900)
+        self.roi = None
+        self.sigma_win = None
         
         self.init_ui()
 
@@ -137,46 +338,66 @@ class FastLargeDataPlotter(QMainWindow):
         # 6. 右下角GMM控制区域
         gmmcontrol_group = QGroupBox("GMM Control")
         gmmcontrol_layout = QGridLayout()
-        gmmcontrol_layout.addWidget(QLabel("freq start (Hz):"), 0, 0)
+
+        # 单选 ROI 框选按钮
+        self.radio_select_roi = QRadioButton('Select Region (ROI)')
+        gmmcontrol_layout.addWidget(self.radio_select_roi, 0, 0, 1, 2)
+
+        gmmcontrol_layout.addWidget(QLabel("freq start (Hz):"), 1, 0)
         self.spin_x0 = QDoubleSpinBox()
-        self.spin_x0.setRange(306e6,312e6); self.spin_x0.setValue(308e6); self.spin_x0.setDecimals(3); self.spin_x0.setSingleStep(0.1)
-        gmmcontrol_layout.addWidget(self.spin_x0, 0, 1)
-        gmmcontrol_layout.addWidget(QLabel("freq end (Hz):"), 1, 0)
+        self.spin_x0.setRange(0, 1e10); self.spin_x0.setValue(308e6); self.spin_x0.setDecimals(3); self.spin_x0.setSingleStep(0.1)
+        gmmcontrol_layout.addWidget(self.spin_x0, 1, 1)
+        gmmcontrol_layout.addWidget(QLabel("freq end (Hz):"), 2, 0)
         self.spin_x1 = QDoubleSpinBox()
-        self.spin_x1.setRange(306e6,312e6); self.spin_x1.setValue(308.5e6); self.spin_x1.setDecimals(3); self.spin_x1.setSingleStep(0.1)
-        gmmcontrol_layout.addWidget(self.spin_x1, 1, 1)
-        gmmcontrol_layout.addWidget(QLabel("height start:"), 2, 0)
+        self.spin_x1.setRange(0, 1e10); self.spin_x1.setValue(308.5e6); self.spin_x1.setDecimals(3); self.spin_x1.setSingleStep(0.1)
+        gmmcontrol_layout.addWidget(self.spin_x1, 2, 1)
+        gmmcontrol_layout.addWidget(QLabel("height start:"), 3, 0)
         self.spin_y0 = QDoubleSpinBox()
-        self.spin_y0.setRange(-1,1000); self.spin_y0.setValue(0); self.spin_y0.setDecimals(3); self.spin_y0.setSingleStep(0.2)
-        gmmcontrol_layout.addWidget(self.spin_y0, 2, 1)
-        gmmcontrol_layout.addWidget(QLabel("height end:"), 3, 0)
+        self.spin_y0.setRange(-100, 100000); self.spin_y0.setValue(0); self.spin_y0.setDecimals(3); self.spin_y0.setSingleStep(0.2)
+        gmmcontrol_layout.addWidget(self.spin_y0, 3, 1)
+        gmmcontrol_layout.addWidget(QLabel("height end:"), 4, 0)
         self.spin_y1 = QDoubleSpinBox()
-        self.spin_y1.setRange(-1,1000); self.spin_y1.setValue(10); self.spin_y1.setDecimals(3); self.spin_y1.setSingleStep(0.1)
-        gmmcontrol_layout.addWidget(self.spin_y1, 3, 1)
-        gmmcontrol_layout.addWidget(QLabel("init ion freqs:"), 4, 0)
+        self.spin_y1.setRange(-100, 100000); self.spin_y1.setValue(10); self.spin_y1.setDecimals(3); self.spin_y1.setSingleStep(0.1)
+        gmmcontrol_layout.addWidget(self.spin_y1, 4, 1)
+
+        # Append Ion 按钮与搜索框
+        self.btn_append_ion = QPushButton('Append Ion')
+        gmmcontrol_layout.addWidget(self.btn_append_ion, 5, 0)
+
+        self.linedit_search_ion = QLineEdit()
+        self.linedit_search_ion.setPlaceholderText("e.g. 195Os75(1)+, 204")
+        self.ion_completer = QCompleter(self)
+        self.ion_completer.setFilterMode(Qt.MatchContains)
+        self.ion_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.linedit_search_ion.setCompleter(self.ion_completer)
+        gmmcontrol_layout.addWidget(self.linedit_search_ion, 5, 1)
+
+        gmmcontrol_layout.addWidget(QLabel("init ion freqs:"), 6, 0)
         self.linedit_ionfreqs = QLineEdit()
         self.linedit_ionfreqs.setText('{}')
-        gmmcontrol_layout.addWidget(self.linedit_ionfreqs, 4, 1)
-        gmmcontrol_layout.addWidget(QLabel("{'195Os75(1)+':[308000756.01, 204], \n'195Os75(0)+'}:[308000960.24, 204],...}"), 5, 1)
+        gmmcontrol_layout.addWidget(self.linedit_ionfreqs, 6, 1)
+        gmmcontrol_layout.addWidget(QLabel("{'195Os75(1)+':[308000756.01, 204], \n'195Os75(0)+'}:[308000960.24, 204],...}"), 7, 1)
         self.btn_gmm = QPushButton('GMM run')
         self.btn_clear = QPushButton('Clear result')
-        gmmcontrol_layout.addWidget(self.btn_gmm, 6, 1)
-        gmmcontrol_layout.addWidget(self.btn_clear, 7, 1)
+        gmmcontrol_layout.addWidget(self.btn_gmm, 8, 1)
+        gmmcontrol_layout.addWidget(self.btn_clear, 9, 1)
         self.btn_csvFolder = QPushButton("Folder")
-        gmmcontrol_layout.addWidget(self.btn_csvFolder)
+        gmmcontrol_layout.addWidget(self.btn_csvFolder, 10, 0)
         self.linedit_csvFolder = QLineEdit()
         self.linedit_csvFolder.setReadOnly(True)
         self.linedit_csvFolder.setPlaceholderText("Please select folder ...")
-        gmmcontrol_layout.addWidget(self.linedit_csvFolder, 8, 1)
-        gmmcontrol_layout.addWidget(QLabel("Filename:"), 9, 0)
+        gmmcontrol_layout.addWidget(self.linedit_csvFolder, 10, 1)
+        gmmcontrol_layout.addWidget(QLabel("Filename:"), 11, 0)
         self.linedit_filename = QLineEdit()
         self.linedit_filename.setText('')
-        gmmcontrol_layout.addWidget(self.linedit_filename, 9, 1)
+        gmmcontrol_layout.addWidget(self.linedit_filename, 11, 1)
         self.btn_csvSave = QPushButton('Save .csv')
-        gmmcontrol_layout.addWidget(self.btn_csvSave, 10, 1)
+        gmmcontrol_layout.addWidget(self.btn_csvSave, 12, 1)
         gmmcontrol_group.setLayout(gmmcontrol_layout)
         layout.addWidget(gmmcontrol_group, 2, 1)
 
+        self.radio_select_roi.toggled.connect(self.on_roi_toggled)
+        self.btn_append_ion.clicked.connect(self.append_searched_ion)
         self.btn_gmm.clicked.connect(self.gmm_start)
         self.btn_clear.clicked.connect(self.result_clear)
         self.btn_csvFolder.clicked.connect(self.select_folder)
@@ -216,6 +437,13 @@ class FastLargeDataPlotter(QMainWindow):
             self.label_items = [] 
             self.current_ion_brushes = None  # 重置填充色缓存
 
+            # 更新补全提示列表
+            if 'ion' in self.df_ref.columns and 'harmonic' in self.df_ref.columns:
+                ref_items = []
+                for _, row in self.df_ref.dropna(subset=['ion', 'harmonic']).iterrows():
+                    ref_items.append(f"{row['ion']}, {int(row['harmonic'])}")
+                self.ion_completer.setModel(QStringListModel(ref_items, self))
+
             self.plot_reference_lines()
             self.plot_data()
             self.update_histograms()
@@ -232,6 +460,92 @@ class FastLargeDataPlotter(QMainWindow):
             return
         self.btn_fileLoad.setEnabled(True)
         self.btn_fileLoad.setText('Load files')
+
+    def on_roi_toggled(self, checked):
+        if checked:
+            view_range = self.p_main.viewRange()
+            x_min, x_max = view_range[0][0], view_range[0][1]
+            y_min, y_max = view_range[1][0], view_range[1][1]
+            
+            dx = x_max - x_min
+            dy = y_max - y_min
+            
+            roi_x0 = x_min + 0.2 * dx
+            roi_w = 0.6 * dx
+            roi_y0 = y_min + 0.2 * dy
+            roi_h = 0.6 * dy
+            
+            if self.roi is not None:
+                self.p_main.removeItem(self.roi)
+                self.roi = None
+            
+            self.roi = pg.RectROI([roi_x0, roi_y0], [roi_w, roi_h], pen=pg.mkPen('r', width=2))
+            self.p_main.addItem(self.roi)
+            self.roi.sigRegionChanged.connect(self.update_spins_from_roi)
+            self.update_spins_from_roi()
+        else:
+            if self.roi is not None:
+                self.p_main.removeItem(self.roi)
+                self.roi = None
+
+    def update_spins_from_roi(self):
+        if self.roi is None:
+            return
+        pos = self.roi.pos()
+        size = self.roi.size()
+
+        x0, x1 = pos.x(), pos.x() + size.x()
+        y0, y1 = pos.y(), pos.y() + size.y()
+
+        self.spin_x0.setValue(min(x0, x1))
+        self.spin_x1.setValue(max(x0, x1))
+        self.spin_y0.setValue(min(y0, y1))
+        self.spin_y1.setValue(max(y0, y1))
+
+    def append_searched_ion(self):
+        input_text = self.linedit_search_ion.text().strip()
+        if not input_text:
+            return
+
+        if not hasattr(self, 'df_ref') or self.df_ref is None or self.df_ref.empty:
+            QMessageBox.warning(self, "Warning", "Please load reference file first!")
+            return
+
+        if ',' in input_text:
+            parts = [p.strip() for p in input_text.split(',')]
+            ion_name = parts[0]
+            try:
+                harmonic_val = int(parts[1])
+            except ValueError:
+                harmonic_val = None
+        else:
+            ion_name = input_text
+            harmonic_val = None
+
+        if harmonic_val is not None:
+            matched = self.df_ref[(self.df_ref['ion'] == ion_name) & (self.df_ref['harmonic'] == harmonic_val)]
+        else:
+            matched = self.df_ref[self.df_ref['ion'] == ion_name]
+
+        if matched.empty:
+            QMessageBox.warning(self, "Warning", f"Ion '{input_text}' not found in reference file!")
+            return
+
+        row = matched.iloc[0]
+        freq_hz = round(float(row['peak_loc'] * 1e3), 2)
+        h_val = int(row['harmonic'])
+
+        curr_text = self.linedit_ionfreqs.text().strip()
+        try:
+            curr_dict = ast.literal_eval(curr_text) if curr_text else {}
+            if not isinstance(curr_dict, dict):
+                curr_dict = {}
+        except Exception:
+            curr_dict = {}
+
+        curr_dict[ion_name] = [freq_hz, h_val]
+        self.linedit_ionfreqs.setText(str(curr_dict))
+        self.linedit_search_ion.clear()
 
     def add_refIons(self):
         self.btn_addRef.setEnabled(False)
@@ -275,7 +589,7 @@ class FastLargeDataPlotter(QMainWindow):
     def plot_reference_lines(self):
         for _, row in self.df_ref.iterrows():
             x_val = row['peak_loc'] * 1e3
-            ion_label = row['ion'] + '\nsigma: {:.3f}\nh = {:d}'.format(row['peak_sig'] * 1e3, row['harmonic'])
+            ion_label = row['ion'] + '\nsigma: {:.3f}\nh = {:d}'.format(row['peak_sig'] * 1e3, int(row['harmonic']))
             
             line = pg.InfiniteLine(pos=x_val, angle=90, pen=pg.mkPen('lightgray', width=1.5, style=Qt.DashLine))
             self.p_main.addItem(line)
@@ -287,20 +601,15 @@ class FastLargeDataPlotter(QMainWindow):
         self.dynamic_labels = []
 
     def plot_data(self):
-        # 1. 获取 exist_time 数据范围
         times = self.df_data['exist_time'].values
         t_min = times.min() if len(times) > 0 else 0.0
         t_max = times.max() if len(times) > 0 else 2.9
         if t_max == t_min:
             t_max = t_min + 1e-5
 
-        # 2. 保存 Viridis ColorMap 对象供全局调色使用
         self.pg_cmap = pg.colormap.getFromMatplotlib('viridis')
-
-        # 3. 创建散点图
         self.scatter = pg.ScatterPlotItem(x=self.df_data['peak_pos'], y=self.df_data['height_ion'], size=10, symbol='o')
 
-        # 4. 绘制 Pair 连线
         df_pair = self.df_data[self.df_data['pair_num'] != 0]
         x0_pair, x1_pair, y0_pair, y1_pair = [], [], [], []
         for i, group in df_pair.groupby('filename'):
@@ -321,7 +630,6 @@ class FastLargeDataPlotter(QMainWindow):
 
         self.p_main.addItem(self.scatter)
 
-        # 5. 创建或刷新 ColorBar 并绑定滑块拖动事件
         if not hasattr(self, 'colorbar'):
             try:
                 self.colorbar = pg.ColorBarItem(values=(t_min, t_max), colorMap=self.pg_cmap, label='Exist Time (s)')
@@ -336,15 +644,12 @@ class FastLargeDataPlotter(QMainWindow):
                 except TypeError:
                     self.win.addItem(self.colorbar, row=0, col=2)
             
-            # 监听 ColorBar 交互滑块，变动时触发实时重绘
             self.colorbar.sigLevelsChanged.connect(self.on_colorbar_levels_changed)
         else:
             self.colorbar.setLevels((t_min, t_max))
 
-        # 初始渲染
         self.on_colorbar_levels_changed()
 
-        # 十字准星
         self.v_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(color='white', style=Qt.DotLine))
         self.h_line = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen(color='white', style=Qt.DotLine))
         self.p_main.addItem(self.v_line, ignoreBounds=True)
@@ -352,27 +657,21 @@ class FastLargeDataPlotter(QMainWindow):
         self.p_main.scene().sigMouseMoved.connect(self.on_mouse_moved)
 
     def on_colorbar_levels_changed(self):
-        """拖动 ColorBar 滑块时，实时更新散点外框 (pen) 的 exist_time 颜色映射"""
         if not hasattr(self, 'df_data') or self.df_data is None or self.df_data.empty:
             return
 
-        # 1. 读取 ColorBar 当前交互调出的极值
         c_min, c_max = self.colorbar.levels()
         if c_max == c_min:
             c_max = c_min + 1e-5
 
-        # 2. 根据最新的 levels 对 exist_time 重新做 Normalize
         times = self.df_data['exist_time'].values
         norm_times = np.clip((times - c_min) / (c_max - c_min), 0.0, 1.0)
 
-        # 3. 生成基于 Viridis 的外框线条颜色的 Pen 列表
         qcolors = self.pg_cmap.map(norm_times, mode='qcolor')
         pen_list = [pg.mkPen(color=c, width=1.5) for c in qcolors]
 
-        # 4. 获取当前的 Brush 列表（如果有 GMM 结果则填充 ion 离散色，无则全空）
         brush_list = getattr(self, 'current_ion_brushes', None)
 
-        # 5. 刷新散点绘制
         self.scatter.setData(
             x=self.df_data['peak_pos'],
             y=self.df_data['height_ion'],
@@ -431,7 +730,6 @@ class FastLargeDataPlotter(QMainWindow):
         self.df_data['ion'] = possible_ion_range
         self.df_data['harmonic'] = possible_harmonic_range
         
-        # 1. 获取选中的离散离子种类，并分配离散颜色
         real_unique_ions = [ion for ion in self.df_data['ion'].unique() if ion != '']
         num_colors = len(real_unique_ions)
         
@@ -441,23 +739,19 @@ class FastLargeDataPlotter(QMainWindow):
         else:
             ion_color_map = {}
 
-        # 2. 为全部数据构建对应的填充色（brush）列表
         self.current_ion_brushes = [
             pg.mkBrush(ion_color_map[ion]) if ion != '' else None 
             for ion in self.df_data['ion']
         ]
 
-        # 3. 重新渲染散点（外框 pen 会自动匹配 ColorBar 当前范围）
         self.on_colorbar_levels_changed()
 
-        # 4. 清理旧标签
         if not hasattr(self, 'dynamic_labels'):
             self.dynamic_labels = []
         for old_text_item in self.dynamic_labels:
             self.p_main.removeItem(old_text_item)
         self.dynamic_labels.clear()
 
-        # 5. 按 ion 分组绘制新标签（文字颜色与填色相同）
         for ion_name in real_unique_ions:
             df_sub = self.df_data[self.df_data['ion'] == ion_name]
             if df_sub.empty:
@@ -475,16 +769,16 @@ class FastLargeDataPlotter(QMainWindow):
 
         self.btn_gmm.setEnabled(True)
         self.btn_gmm.setText('GMM run')
+        
+        # [新增改进]: GMM 运行完成后，自动将 init ion freqs 重置为 {}
+        self.linedit_ionfreqs.setText('{}')
 
     def result_clear(self):
         self.btn_clear.setEnabled(False)
         self.df_data['ion'] = ''
         self.df_data['harmonic'] = np.nan
 
-        # 重置填充色为空心
         self.current_ion_brushes = None
-
-        # 刷新渲染
         self.on_colorbar_levels_changed()
 
         if not hasattr(self, 'dynamic_labels'):
@@ -504,8 +798,45 @@ class FastLargeDataPlotter(QMainWindow):
         self.btn_csvSave.setEnabled(False)
         self.btn_csvSave.setText('Saving .csv ...')
         try:
-            new_order = ['peak_pos', 'err_pos', 'sigma', 'err_sigma', 'height_ratio', 'height_ion', 'exist_sate', 'exist_time', 'valid', 'pair_num', 'ion', 'harmonic', 'filename']
-            self.df_data[new_order].to_csv(os.path.join(self.linedit_csvFolder.text().strip(), self.linedit_filename.text().strip()), index=False)
+            # 匹配并增加 'm/q' 与 'gamma' 列
+            if hasattr(self, 'df_ref') and self.df_ref is not None:
+                if 'm/q' in self.df_ref.columns:
+                    mq_map = dict(zip(self.df_ref['ion'], self.df_ref['m/q']))
+                    self.df_data['m/q'] = self.df_data['ion'].map(mq_map)
+                else:
+                    self.df_data['m/q'] = np.nan
+
+                if 'gamma' in self.df_ref.columns:
+                    gamma_map = dict(zip(self.df_ref['ion'], self.df_ref['gamma']))
+                    self.df_data['gamma'] = self.df_data['ion'].map(gamma_map)
+                else:
+                    self.df_data['gamma'] = np.nan
+            else:
+                self.df_data['m/q'] = np.nan
+                self.df_data['gamma'] = np.nan
+
+            new_order = [
+                'peak_pos', 'err_pos', 'sigma', 'err_sigma', 'height_ratio', 
+                'height_ion', 'exist_sate', 'exist_time', 'valid', 'pair_num', 
+                'ion', 'harmonic', 'm/q', 'gamma', 'filename'
+            ]
+            
+            cols_to_save = [c for c in new_order if c in self.df_data.columns]
+            save_path = os.path.join(self.linedit_csvFolder.text().strip(), self.linedit_filename.text().strip())
+            self.df_data[cols_to_save].to_csv(save_path, index=False)
+
+            # 保存成功后弹出询问框
+            reply = QMessageBox.question(
+                self,
+                'Plot Request',
+                'Save successful! Do you want to plot the sigma f/f plot?',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                self.show_sigma_plot()
+
         except Exception as e:
             QMessageBox.critical(
                 self,
@@ -516,8 +847,45 @@ class FastLargeDataPlotter(QMainWindow):
             self.btn_csvSave.setEnabled(True)
             self.btn_csvSave.setText('Save .csv')
             return
+
         self.btn_csvSave.setEnabled(True)
         self.btn_csvSave.setText('Save .csv')
+
+    def show_sigma_plot(self):
+        df_valid = self.df_data[self.df_data['ion'].notna() & (self.df_data['ion'] != '')].copy()
+        if df_valid.empty:
+            QMessageBox.information(self, "Notice", "No classified ion found in data!")
+            return
+
+        df_valid['f_i'] = df_valid['peak_pos'] / df_valid['harmonic']
+
+        records = []
+        for ion, group in df_valid.groupby('ion'):
+            if len(group) == 0:
+                continue
+            
+            f_mean = group['f_i'].mean()
+            f_std = group['f_i'].std(ddof=1) if len(group) > 1 else 0.0
+            rel_sigma = f_std / f_mean if f_mean != 0 else 0.0
+            
+            mq_val = group['m/q'].iloc[0] if 'm/q' in group.columns else np.nan
+            gamma_val = group['gamma'].iloc[0] if 'gamma' in group.columns else np.nan
+
+            records.append({
+                'ion': ion,
+                'm/q': mq_val,
+                'gamma': gamma_val,
+                'rel_sigma': rel_sigma
+            })
+
+        summary_df = pd.DataFrame(records).dropna(subset=['m/q', 'gamma'])
+
+        if summary_df.empty:
+            QMessageBox.warning(self, "Warning", "'m/q' or 'gamma' values could not be matched for any ion. Please check your ref file!")
+            return
+
+        self.sigma_win = SigmaPlotWindow(summary_df)
+        self.sigma_win.show()
 
     def update_histograms(self):
         view_range = self.p_main.viewRange()
