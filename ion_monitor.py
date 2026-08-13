@@ -58,7 +58,7 @@ class Worker(QObject):
         self.result_ready.emit(self.df['ion'].values, self.df['harmonic'].values)
 
 
-# 双 X 轴 sigma f/f 绘图与拟合控制窗口（修复上 X 轴刻度物理数值映射）
+# 双 X 轴 sigma f/f 绘图与拟合控制窗口（精简为单一散点呈现）
 class SigmaPlotWindow(QMainWindow):
     def __init__(self, summary_df):
         super().__init__()
@@ -118,7 +118,7 @@ class SigmaPlotWindow(QMainWindow):
         self.p_main.setLabel('bottom', 'm/q')
         self.p_main.setLabel('left', 'sigma f / f')
 
-        # 提取数据真实极值范围，用于建立 m/q 与 gamma 的独立物理映射
+        # 提取数据真实极值范围，用于建立 m/q 与 gamma 的物理映射
         self.mq_min = self.summary_df['m/q'].min()
         self.mq_max = self.summary_df['m/q'].max()
         self.gamma_min = self.summary_df['gamma'].min()
@@ -162,16 +162,19 @@ class SigmaPlotWindow(QMainWindow):
         """m/q 到 gamma 的线性换算函数"""
         return self.gamma_min + (mq - self.mq_min) * (self.gamma_max - self.gamma_min) / (self.mq_max - self.mq_min)
 
+    def gamma_to_mq(self, gamma):
+        """gamma 到 m/q 的线性换算函数"""
+        return self.mq_min + (gamma - self.gamma_min) * (self.mq_max - self.mq_min) / (self.gamma_max - self.gamma_min)
+
     def plot_data(self):
         if self.summary_df.empty:
             return
 
         mq_vals = self.summary_df['m/q'].values
-        gamma_vals = self.summary_df['gamma'].values
         y_vals = self.summary_df['rel_sigma'].values
         ions = self.summary_df['ion'].values
 
-        # 1. 底部 ViewBox (m/q vs sigma f/f) 绘制散点及标签
+        # 仅在主视图 p_main 上绘制一套散点及标签（上轴 gamma 仅作为坐标标尺）
         scatter_bottom = pg.ScatterPlotItem(
             x=mq_vals, y=y_vals, size=12, symbol='o', 
             brush=pg.mkBrush('cyan'), pen=pg.mkPen('w', width=1)
@@ -182,13 +185,6 @@ class SigmaPlotWindow(QMainWindow):
             text_item = pg.TextItem(text=str(ion), color='yellow', anchor=(0.5, 1.2))
             text_item.setPos(x, y)
             self.p_main.addItem(text_item)
-
-        # 2. 顶部 ViewBox (gamma vs sigma f/f) 绘制对应散点
-        scatter_top = pg.ScatterPlotItem(
-            x=gamma_vals, y=y_vals, size=10, symbol='t1', 
-            brush=pg.mkBrush('magenta'), pen=pg.mkPen('w', width=1)
-        )
-        self.vb_top.addItem(scatter_top)
 
         # 设置主视口的范围，触发自动映射更新顶部 view
         dmq = self.mq_max - self.mq_min
@@ -215,32 +211,32 @@ class SigmaPlotWindow(QMainWindow):
             x_data = self.summary_df['gamma'].values
             y_data = self.summary_df['rel_sigma'].values
 
-            # 拟合公式: y = |1/x^2 - 1/γt^2| * ΔΒρ/Βρ * 0.01
-            def fit_func(x, g_t, d_brp):
-                return np.abs(1.0 / (x**2) - 1.0 / (g_t**2)) * d_brp * 0.01
+            # 拟合公式: y = |1/x^2 - 1/γt^2| * ΔΒρ/Βρ * 0.01 + const
+            def fit_func(x, g_t, d_brp, const):
+                return np.abs(1.0 / (x**2) - 1.0 / (g_t**2)) * d_brp * 0.01 + const
 
-            popt, _ = curve_fit(fit_func, x_data, y_data, p0=[init_gammat, init_dbrp], maxfev=5000)
+            popt, _ = curve_fit(fit_func, x_data, y_data, p0=[init_gammat, init_dbrp, 0.0], maxfev=5000)
             
-            fit_g_t, fit_d_brp = popt[0], popt[1]
+            fit_g_t, fit_d_brp, fit_const = popt[0], popt[1], popt[2]
 
             # 覆盖写入输入框
             self.spin_gammat.setValue(float(fit_g_t))
             self.spin_dbrp.setValue(float(fit_d_brp))
 
             # 清理旧的拟合曲线
-            if hasattr(self, 'fit_curve') and self.fit_curve in self.vb_top.addedItems:
-                self.vb_top.removeItem(self.fit_curve)
+            if hasattr(self, 'fit_curve') and self.fit_curve in self.p_main.items:
+                self.p_main.removeItem(self.fit_curve)
 
-            # 绘制新拟合曲线 (基于 gamma X 轴，添加到 vb_top)
-            x_min, x_max = x_data.min(), x_data.max()
-            dx = (x_max - x_min) if x_max != x_min else 1.0
-            x_fit = np.linspace(x_min - 0.2 * dx, x_max + 0.2 * dx, 300)
-            y_fit = fit_func(x_fit, fit_g_t, fit_d_brp)
+            # 在主图 p_main 上绘制拟合曲线（将 gamma 坐标转换为 m/q 绘制，确保对齐）
+            gamma_min, gamma_max = x_data.min(), x_data.max()
+            gamma_fit = np.linspace(gamma_min, gamma_max, 50)
+            y_fit = fit_func(gamma_fit, fit_g_t, fit_d_brp, fit_const)
+            mq_fit = self.gamma_to_mq(gamma_fit)
 
-            self.fit_curve = pg.PlotCurveItem(x_fit, y_fit, pen=pg.mkPen('r', width=2, style=Qt.SolidLine))
-            self.vb_top.addItem(self.fit_curve)
+            self.fit_curve = pg.PlotCurveItem(mq_fit, y_fit, pen=pg.mkPen('r', width=2, style=Qt.SolidLine))
+            self.p_main.addItem(self.fit_curve)
 
-            self.status_bar.showMessage(f"Fitting succeeded: γt = {fit_g_t:.4f}, ΔΒρ/Βρ = {fit_d_brp:.4f}%", 5000)
+            self.status_bar.showMessage(f"Fitting succeeded: γt = {fit_g_t:.4f}, ΔΒρ/Βρ = {fit_d_brp:.4f}%, const = {fit_const:.6e}", 5000)
 
         except Exception as e:
             self.status_bar.showMessage(f"Fitting failed: {str(e)}", 5000)
@@ -770,7 +766,7 @@ class FastLargeDataPlotter(QMainWindow):
         self.btn_gmm.setEnabled(True)
         self.btn_gmm.setText('GMM run')
         
-        # [新增改进]: GMM 运行完成后，自动将 init ion freqs 重置为 {}
+        # GMM 运行完成后，自动将 init ion freqs 重置为 {}
         self.linedit_ionfreqs.setText('{}')
 
     def result_clear(self):
