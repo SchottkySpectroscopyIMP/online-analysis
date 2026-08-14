@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 
-import sys, ast, os
+import sys, ast, os, platform
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QS
                             QPushButton, QMessageBox, QDoubleSpinBox, QLineEdit, QFileDialog,
                              QHBoxLayout, QSpinBox, QLabel, QGroupBox, QGridLayout, QCompleter, QRadioButton)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, QStringListModel
+from PyQt5.QtGui import QFont
 from sklearn.mixture import GaussianMixture
 from scipy.spatial.distance import cdist
 from scipy.optimize import curve_fit
@@ -62,14 +63,15 @@ class Worker(QObject):
 class SigmaPlotWindow(QMainWindow):
     def __init__(self, summary_df):
         super().__init__()
-        self.setWindowTitle("sigma f/f vs m/q & gamma")
+        self.setWindowTitle("σf/f vs m/q & γ")
         self.resize(1000, 600)
         self.summary_df = summary_df
+        self.apply_global_font()
 
         # 状态栏
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.coord_label = QLabel("m/q: 0.0000, gamma: 0.0000, sigma f/f: 0.000000")
+        self.coord_label = QLabel("m/q: 0.0000, γ: 0.0000, σf/f: 0.000000")
         self.status_bar.addPermanentWidget(self.coord_label)
 
         # 布局构建
@@ -112,11 +114,28 @@ class SigmaPlotWindow(QMainWindow):
         # 初始化图表
         self.init_plot()
 
+    def apply_global_font(self):
+        curr_system = platform.system()
+
+        if curr_system == 'Windows':
+            font_family = ['Consolas', 'Microsoft YaHei UI', 'Courier New']
+        elif curr_system == 'Darwin':
+            font_family = ['Menlo', 'Monaco', 'PingFang SC', 'Heiti SC']
+        else:
+            font_family = ['Ubuntu Mono', 'Fira Code', 'DejaVu Sans Mono', 'Noto Sans CJK SC', 'WenQuanYi Zen Hei']
+
+        font = QFont()
+        font.setFamilies(font_family)
+        font.setPointSize(10)
+
+        font.setStyleHint(QFont.Monospace)
+        QApplication.instance().setFont(font)
+
     def init_plot(self):
         self.p_main = self.plot_widget.getPlotItem()
         self.p_main.showGrid(x=True, y=True, alpha=0.3)
         self.p_main.setLabel('bottom', 'm/q')
-        self.p_main.setLabel('left', 'sigma f / f')
+        self.p_main.setLabel('left', 'σf / f')
 
         # 提取数据真实极值范围，用于建立 m/q 与 gamma 的物理映射
         self.mq_min = self.summary_df['m/q'].min()
@@ -133,7 +152,7 @@ class SigmaPlotWindow(QMainWindow):
         self.vb_top = pg.ViewBox()
         self.p_main.scene().addItem(self.vb_top)
         self.axis_top = pg.AxisItem('top')
-        self.axis_top.setLabel('gamma')
+        self.axis_top.setLabel('γ')
         self.p_main.layout.addItem(self.axis_top, 1, 1)
         self.axis_top.linkToView(self.vb_top)
         self.vb_top.setYLink(self.p_main.vb)
@@ -196,7 +215,7 @@ class SigmaPlotWindow(QMainWindow):
             pt_bottom = self.p_main.vb.mapSceneToView(pos)
             pt_top = self.vb_top.mapSceneToView(pos)
             self.coord_label.setText(
-                f"m/q: {pt_bottom.x():.4f}, gamma: {pt_top.x():.4f}, sigma f/f: {pt_bottom.y():.6e}"
+                f"m/q: {pt_bottom.x():.4f}, γ: {pt_top.x():.4f}, σf/f: {pt_bottom.y():.6e}"
             )
 
     def run_fitting(self):
@@ -254,8 +273,27 @@ class FastLargeDataPlotter(QMainWindow):
         self.resize(1400, 900)
         self.roi = None
         self.sigma_win = None
+        self.apply_global_font()
         
         self.init_ui()
+
+    def apply_global_font(self):
+        curr_system = platform.system()
+
+        if curr_system == 'Windows':
+            font_family = ['Consolas', 'Microsoft YaHei UI', 'Courier New']
+        elif curr_system == 'Darwin':
+            font_family = ['Menlo', 'Monaco', 'PingFang SC', 'Heiti SC']
+        else:
+            font_family = ['Ubuntu Mono', 'Fira Code', 'DejaVu Sans Mono', 'Noto Sans CJK SC', 'WenQuanYi Zen Hei']
+
+        font = QFont()
+        font.setFamilies(font_family)
+        font.setPointSize(10)
+
+        font.setStyleHint(QFont.Monospace)
+        QApplication.instance().setFont(font)
+
 
     def init_ui(self):
         central_widget = QWidget()
