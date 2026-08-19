@@ -294,7 +294,6 @@ class FastLargeDataPlotter(QMainWindow):
         font.setStyleHint(QFont.Monospace)
         QApplication.instance().setFont(font)
 
-
     def init_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -463,8 +462,25 @@ class FastLargeDataPlotter(QMainWindow):
             self.data_dir, self.data_name = os.path.split(self.linedit_dataFile.text())
             self.df_data = pd.read_csv(self.linedit_dataFile.text())
             self.df_ref = pd.read_csv(self.linedit_refFile.text())
-            self.df_data['ion'] = ''
-            self.df_data['harmonic'] = np.nan
+            
+            # [检查与补全]: 确保关键列存在
+            for col in ['ion', 'harmonic', 'm/q', 'gamma']:
+                if col not in self.df_data.columns:
+                    if col == 'ion':
+                        self.df_data['ion'] = ''
+                    else:
+                        self.df_data[col] = np.nan
+            
+            # 保证 ion 格式统一
+            self.df_data['ion'] = self.df_data['ion'].fillna('').astype(str)
+            
+            # [数据联动与修复]: 导入的 df_data 中若含有 ion，但缺少 harmonic/m/q/gamma，自动基于 df_ref 补齐
+            if hasattr(self, 'df_ref') and self.df_ref is not None and not self.df_ref.empty:
+                for ref_col in ['harmonic', 'm/q', 'gamma']:
+                    if ref_col in self.df_ref.columns:
+                        ref_map = dict(zip(self.df_ref['ion'], self.df_ref[ref_col]))
+                        mapped_series = self.df_data['ion'].map(ref_map)
+                        self.df_data[ref_col] = self.df_data[ref_col].combine_first(mapped_series)
             
             # 修正：在 columns 上使用 .str.replace
             self.df_ref.columns = self.df_ref.columns.str.replace(r"\s*\(.*?\)", "", regex=True)
@@ -481,6 +497,11 @@ class FastLargeDataPlotter(QMainWindow):
             self.plot_reference_lines()
             self.plot_data()
             self.update_histograms()
+
+            # [二次导入识别]: 若数据中包含已被分类标记的 ion，自动触发色彩渲染和定位打标
+            if (self.df_data['ion'] != '').any():
+                self.update_ion_visualization()
+
             self.linedit_filename.setText(self.data_name)
         except Exception as e:
             QMessageBox.critical(
@@ -494,6 +515,57 @@ class FastLargeDataPlotter(QMainWindow):
             return
         self.btn_fileLoad.setEnabled(True)
         self.btn_fileLoad.setText('Load files')
+
+    # [修复核心]: 使用 peak_pos 取替代之前的 peak_loc 进行定位打标
+    def update_ion_visualization(self):
+        real_unique_ions = [ion for ion in self.df_data['ion'].unique() if str(ion).strip() != '']
+        num_colors = len(real_unique_ions)
+        
+        if num_colors > 0:
+            colors = [pg.intColor(i, num_colors) for i in range(num_colors)]
+            ion_color_map = dict(zip(real_unique_ions, colors))
+        else:
+            ion_color_map = {}
+
+        self.current_ion_brushes = [
+            pg.mkBrush(ion_color_map[str(ion)]) if str(ion).strip() != '' else None 
+            for ion in self.df_data['ion']
+        ]
+
+        self.on_colorbar_levels_changed()
+
+        if not hasattr(self, 'dynamic_labels'):
+            self.dynamic_labels = []
+        for old_text_item in self.dynamic_labels:
+            self.p_main.removeItem(old_text_item)
+        self.dynamic_labels.clear()
+
+        for ion_name in real_unique_ions:
+            df_sub = self.df_data[self.df_data['ion'] == ion_name]
+            if df_sub.empty:
+                continue
+            
+            # 优先根据 harmonic 维度按 peak_pos 均值定位
+            unique_harmonics = df_sub['harmonic'].dropna().unique()
+            if len(unique_harmonics) > 0:
+                for h in unique_harmonics:
+                    _df_sub = df_sub[df_sub['harmonic'] == h]
+                    x_center = _df_sub['peak_pos'].mean()
+                    y_position = _df_sub['height_ion'].min()
+                    
+                    text_item = pg.TextItem(text=str(ion_name), color=ion_color_map[ion_name], anchor=(0.5, 0))
+                    text_item.setPos(x_center, y_position)
+                    self.p_main.addItem(text_item)
+                    self.dynamic_labels.append(text_item)
+            else:
+                # 容错降级：若缺少 harmonic，直接用该离子所有点 peak_pos 的均值定位
+                x_center = df_sub['peak_pos'].mean()
+                y_position = df_sub['height_ion'].min()
+                
+                text_item = pg.TextItem(text=str(ion_name), color=ion_color_map[ion_name], anchor=(0.5, 0))
+                text_item.setPos(x_center, y_position)
+                self.p_main.addItem(text_item)
+                self.dynamic_labels.append(text_item)
 
     def on_roi_toggled(self, checked):
         if checked:
@@ -764,42 +836,8 @@ class FastLargeDataPlotter(QMainWindow):
         self.df_data['ion'] = possible_ion_range
         self.df_data['harmonic'] = possible_harmonic_range
         
-        real_unique_ions = [ion for ion in self.df_data['ion'].unique() if ion != '']
-        num_colors = len(real_unique_ions)
-        
-        if num_colors > 0:
-            colors = [pg.intColor(i, num_colors) for i in range(num_colors)]
-            ion_color_map = dict(zip(real_unique_ions, colors))
-        else:
-            ion_color_map = {}
-
-        self.current_ion_brushes = [
-            pg.mkBrush(ion_color_map[ion]) if ion != '' else None 
-            for ion in self.df_data['ion']
-        ]
-
-        self.on_colorbar_levels_changed()
-
-        if not hasattr(self, 'dynamic_labels'):
-            self.dynamic_labels = []
-        for old_text_item in self.dynamic_labels:
-            self.p_main.removeItem(old_text_item)
-        self.dynamic_labels.clear()
-
-        for ion_name in real_unique_ions:
-            df_sub = self.df_data[self.df_data['ion'] == ion_name]
-            if df_sub.empty:
-                continue
-            unique_harmonics = df_sub['harmonic'].unique()
-            for h in unique_harmonics:
-                _df_sub = df_sub[df_sub['harmonic'] == h]
-                x_center = _df_sub['peak_pos'].mean()
-                y_position = _df_sub['height_ion'].min()
-                
-                text_item = pg.TextItem(text=ion_name, color=ion_color_map[ion_name], anchor=(0.5, 0))
-                text_item.setPos(x_center, y_position)
-                self.p_main.addItem(text_item)
-                self.dynamic_labels.append(text_item)
+        # 触发着色与打标注渲染
+        self.update_ion_visualization()
 
         self.btn_gmm.setEnabled(True)
         self.btn_gmm.setText('GMM run')
@@ -832,34 +870,31 @@ class FastLargeDataPlotter(QMainWindow):
         self.btn_csvSave.setEnabled(False)
         self.btn_csvSave.setText('Saving .csv ...')
         try:
-            # 匹配并增加 'm/q' 与 'gamma' 列
+            # 根据 ref. file 补全 'm/q' 与 'gamma' 列
             if hasattr(self, 'df_ref') and self.df_ref is not None:
                 if 'm/q' in self.df_ref.columns:
                     mq_map = dict(zip(self.df_ref['ion'], self.df_ref['m/q']))
-                    self.df_data['m/q'] = self.df_data['ion'].map(mq_map)
-                else:
+                    matched_mq = self.df_data['ion'].map(mq_map)
+                    self.df_data['m/q'] = matched_mq.combine_first(self.df_data.get('m/q', pd.Series(dtype=float)))
+                elif 'm/q' not in self.df_data.columns:
                     self.df_data['m/q'] = np.nan
 
                 if 'gamma' in self.df_ref.columns:
                     gamma_map = dict(zip(self.df_ref['ion'], self.df_ref['gamma']))
-                    self.df_data['gamma'] = self.df_data['ion'].map(gamma_map)
-                else:
+                    matched_gamma = self.df_data['ion'].map(gamma_map)
+                    self.df_data['gamma'] = matched_gamma.combine_first(self.df_data.get('gamma', pd.Series(dtype=float)))
+                elif 'gamma' not in self.df_data.columns:
                     self.df_data['gamma'] = np.nan
             else:
-                self.df_data['m/q'] = np.nan
-                self.df_data['gamma'] = np.nan
+                for col in ['m/q', 'gamma']:
+                    if col not in self.df_data.columns:
+                        self.df_data[col] = np.nan
 
-            new_order = [
-                'peak_pos', 'err_pos', 'sigma', 'err_sigma', 'height_ratio', 
-                'height_ion', 'exist_sate', 'exist_time', 'valid', 'pair_num', 
-                'ion', 'harmonic', 'm/q', 'gamma', 'filename'
-            ]
-            
-            cols_to_save = [c for c in new_order if c in self.df_data.columns]
+            # 保存包含原始全量列以及离子离散分类列的数据集
             save_path = os.path.join(self.linedit_csvFolder.text().strip(), self.linedit_filename.text().strip())
-            self.df_data[cols_to_save].to_csv(save_path, index=False)
+            self.df_data.to_csv(save_path, index=False)
 
-            # 保存成功后弹出询问框
+            # 保存成功后询问绘制 σf/f 曲线
             reply = QMessageBox.question(
                 self,
                 'Plot Request',
