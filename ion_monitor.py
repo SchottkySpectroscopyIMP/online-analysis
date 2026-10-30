@@ -7,7 +7,7 @@ import pandas as pd
 import pyqtgraph as pg
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QStatusBar, 
                             QPushButton, QMessageBox, QDoubleSpinBox, QLineEdit, QFileDialog,
-                             QHBoxLayout, QSpinBox, QLabel, QGroupBox, QGridLayout, QCompleter, QRadioButton)
+                             QHBoxLayout, QSpinBox, QLabel, QGroupBox, QGridLayout, QCompleter, QRadioButton, QTextEdit)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, QStringListModel
 from PyQt5.QtGui import QFont
 from sklearn.mixture import GaussianMixture
@@ -330,8 +330,6 @@ class FastLargeDataPlotter(QMainWindow):
         self.btn_refFile = QPushButton('Ref. file')
         file_layout.addWidget(self.btn_refFile, 1, 0)
         self.linedit_refFile = QLineEdit()
-        self.linedit_refFile.setReadOnly(True)
-        self.linedit_refFile.setPlaceholderText("Please select .csv File ...")
         file_layout.addWidget(self.linedit_refFile, 1, 1)
         self.btn_fileLoad = QPushButton('Load files')
         file_layout.addWidget(self.btn_fileLoad, 2, 1)
@@ -340,7 +338,27 @@ class FastLargeDataPlotter(QMainWindow):
         file_layout.addWidget(self.linedit_refIons, 3, 1)
         file_layout.addWidget(QLabel("{'195Os75(1)+':[308000756.01, 204, 324.786], ...}"), 4, 1)
         self.btn_addRef = QPushButton('Add ref.')
-        file_layout.addWidget(self.btn_addRef, 5,1)
+        file_layout.addWidget(self.btn_addRef, 5, 1)
+
+        # 新增需求：Ref Ion 搜索补全与信息显示区域
+        file_layout.addWidget(QLabel('Ion:'), 6, 0)
+        self.linedit_search_ref_ion = QLineEdit()
+        self.linedit_search_ref_ion.setPlaceholderText("e.g. 206Tl79(0)+")
+        self.ref_ion_completer = QCompleter(self)
+        self.ref_ion_completer.setFilterMode(Qt.MatchContains)
+        self.ref_ion_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.linedit_search_ref_ion.setCompleter(self.ref_ion_completer)
+        file_layout.addWidget(self.linedit_search_ref_ion, 6, 1)
+
+        self.btn_search_ref_ion = QPushButton('Search ion')
+        file_layout.addWidget(self.btn_search_ref_ion, 7, 1)
+
+        self.textedit_ref_info = QTextEdit()
+        self.textedit_ref_info.setReadOnly(True)
+        self.textedit_ref_info.setLineWrapMode(QTextEdit.NoWrap)
+        self.textedit_ref_info.setFixedHeight(95)  # 约 4 行高，多余行支持滚动条拖动
+        file_layout.addWidget(self.textedit_ref_info, 8, 0, 1, 2)
+
         file_group.setLayout(file_layout)
         layout.addWidget(file_group, 0, 1)
 
@@ -348,6 +366,7 @@ class FastLargeDataPlotter(QMainWindow):
         self.btn_refFile.clicked.connect(self.select_refFlie)
         self.btn_fileLoad.clicked.connect(self.load_data)
         self.btn_addRef.clicked.connect(self.add_refIons)
+        self.btn_search_ref_ion.clicked.connect(self.search_ref_ion_info)
 
         # 5. 右中部直方图控制区域
         control_group = QGroupBox("Bins Control")
@@ -436,8 +455,8 @@ class FastLargeDataPlotter(QMainWindow):
         self.btn_csvFolder.clicked.connect(self.select_folder)
         self.btn_csvSave.clicked.connect(self.save_csv)
 
-        layout.setColumnStretch(0,4)
-        layout.setColumnStretch(1,1)
+        layout.setColumnStretch(0, 4)
+        layout.setColumnStretch(1, 1)
 
         # 6. 状态栏
         self.status_bar = QStatusBar()
@@ -487,12 +506,17 @@ class FastLargeDataPlotter(QMainWindow):
             self.label_items = [] 
             self.current_ion_brushes = None  # 重置填充色缓存
 
-            # 更新补全提示列表
+            # 更新补全提示列表 (GMM 区域)
             if 'ion' in self.df_ref.columns and 'harmonic' in self.df_ref.columns:
                 ref_items = []
                 for _, row in self.df_ref.dropna(subset=['ion', 'harmonic']).iterrows():
                     ref_items.append(f"{row['ion']}, {int(row['harmonic'])}")
                 self.ion_completer.setModel(QStringListModel(ref_items, self))
+
+            # 更新 Ref. File 离子搜素补全列表 (仅列出离子的名称)
+            if 'ion' in self.df_ref.columns:
+                unique_ions = sorted(list(self.df_ref['ion'].dropna().astype(str).unique()))
+                self.ref_ion_completer.setModel(QStringListModel(unique_ions, self))
 
             self.plot_reference_lines()
             self.plot_data()
@@ -516,7 +540,81 @@ class FastLargeDataPlotter(QMainWindow):
         self.btn_fileLoad.setEnabled(True)
         self.btn_fileLoad.setText('Load files')
 
-    # [修复核心]: 使用 peak_pos 取替代之前的 peak_loc 进行定位打标
+    # 搜索 Ref File 中特定离子的详细数据及全部 Harmonic
+    def search_ref_ion_info(self):
+        ion_name = self.linedit_search_ref_ion.text().strip()
+        if not ion_name:
+            return
+
+        if not hasattr(self, 'df_ref') or self.df_ref is None or self.df_ref.empty:
+            QMessageBox.warning(self, "Warning", "Please load reference file first!")
+            return
+
+        matched = self.df_ref[self.df_ref['ion'].astype(str) == ion_name]
+        if matched.empty:
+            QMessageBox.warning(self, "Warning", f"Ion '{ion_name}' not found in reference file!")
+            return
+
+        # 尝试提取基本信息字段（自动处理各种列名可能性）
+        row_0 = matched.iloc[0]
+        
+        def get_val(row, possible_keys, default="N/A"):
+            for k in possible_keys:
+                if k in row.index and pd.notna(row[k]):
+                    return row[k]
+            return default
+
+        weight_val = get_val(row_0, ['weight', 'Weight'])
+        yield_val = get_val(row_0, ['yield', 'Yield'])
+        rev_freq_val = get_val(row_0, ['rev_freq', 'rev freq', 'RevFreq', 'rev_frequency'])
+        half_life_val = get_val(row_0, ['half_life', 'half life', 'HalfLife', 'halflife'])
+
+        # 格式化头信息
+        try:
+            w_str = f"{float(weight_val):.3e}" if weight_val != "N/A" else "N/A"
+        except (ValueError, TypeError):
+            w_str = str(weight_val)
+
+        try:
+            y_str = f"{float(yield_val):.3e}" if yield_val != "N/A" else "N/A"
+        except (ValueError, TypeError):
+            y_str = str(yield_val)
+
+        try:
+            rf_str = f"{float(rev_freq_val):.6f}" if rev_freq_val != "N/A" else "N/A"
+        except (ValueError, TypeError):
+            rf_str = str(rev_freq_val)
+
+        hl_str = str(half_life_val)
+
+        res_text = f"{ion_name} in ref. file:\n"
+        res_text += f"weight: {w_str}, yield: {y_str}, rev freq: {rf_str} MHz, half life: {hl_str}\n"
+
+        # 逐行追加所有 harmonic 细节
+        for _, row in matched.iterrows():
+            h_val = get_val(row, ['harmonic', 'Harmonic'], 0)
+            p_loc_val = get_val(row, ['peak_loc', 'peak_pos', 'freq'], 0.0)
+            p_max_val = get_val(row, ['peak_max', 'height_ion', 'height', 'max_peak'], 0.0)
+
+            try:
+                h_int = int(h_val)
+            except (ValueError, TypeError):
+                h_int = 0
+
+            try:
+                p_loc_flt = float(p_loc_val)
+            except (ValueError, TypeError):
+                p_loc_flt = 0.0
+
+            try:
+                p_max_flt = float(p_max_val)
+            except (ValueError, TypeError):
+                p_max_flt = 0.0
+
+            res_text += f"harmonic: {h_int:d}, peak_loc: {p_loc_flt:.3f} kHz, peak_max: {p_max_flt:.3e}\n"
+
+        self.textedit_ref_info.setPlainText(res_text.strip())
+
     def update_ion_visualization(self):
         real_unique_ions = [ion for ion in self.df_data['ion'].unique() if str(ion).strip() != '']
         num_colors = len(real_unique_ions)
@@ -660,7 +758,7 @@ class FastLargeDataPlotter(QMainWindow):
             list_vals = ast.literal_eval(self.linedit_refIons.text())
             for ion, ion_info in list_vals.items():
                 x_val = ion_info[0]
-                ion_label = ion + '\nsigma: {:.3f}\nh = {:d}'.format(ion_info[-1], ion_info[1])
+                ion_label = ion + '\nsigma: {:.3f} Hz\nh = {:d}'.format(ion_info[-1], ion_info[1])
 
                 line = pg.InfiniteLine(pos=x_val, angle=90, pen=pg.mkPen('lightgray', width=1.5, style=Qt.DashLine))
                 self.p_main.addItem(line)
@@ -695,7 +793,7 @@ class FastLargeDataPlotter(QMainWindow):
     def plot_reference_lines(self):
         for _, row in self.df_ref.iterrows():
             x_val = row['peak_loc'] * 1e3
-            ion_label = row['ion'] + '\nsigma: {:.3f}\nh = {:d}'.format(row['peak_sig'] * 1e3, int(row['harmonic']))
+            ion_label = row['ion'] + '\nsigma: {:.3f} Hz\nh = {:d}'.format(row['peak_sig'] * 1e3, int(row['harmonic']))
             
             line = pg.InfiniteLine(pos=x_val, angle=90, pen=pg.mkPen('lightgray', width=1.5, style=Qt.DashLine))
             self.p_main.addItem(line)
