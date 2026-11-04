@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 
-import sys, ast, os, platform
+import sys, ast, os, platform, re
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
@@ -14,8 +14,23 @@ from sklearn.mixture import GaussianMixture
 from scipy.spatial.distance import cdist
 from scipy.optimize import curve_fit
 
+# 内置常用元素周期表 (Element -> Z)
+ELEMENT_Z_TABLE = {
+    'H': 1, 'He': 2, 'Li': 3, 'Be': 4, 'B': 5, 'C': 6, 'N': 7, 'O': 8, 'F': 9, 'Ne': 10,
+    'Na': 11, 'Mg': 12, 'Al': 13, 'Si': 14, 'P': 15, 'S': 16, 'Cl': 17, 'Ar': 18, 'K': 19, 'Ca': 20,
+    'Sc': 21, 'Ti': 22, 'V': 23, 'Cr': 24, 'Mn': 25, 'Fe': 26, 'Co': 27, 'Ni': 28, 'Cu': 29, 'Zn': 30,
+    'Ga': 31, 'Ge': 32, 'As': 33, 'Se': 34, 'Br': 35, 'Kr': 36, 'Rb': 37, 'Sr': 38, 'Y': 39, 'Zr': 40,
+    'Nb': 41, 'Mo': 42, 'Tc': 43, 'Ru': 44, 'Rh': 45, 'Pd': 46, 'Ag': 47, 'Cd': 48, 'In': 49, 'Sn': 50,
+    'Sb': 51, 'Te': 52, 'I': 53, 'Xe': 54, 'Cs': 55, 'Ba': 56, 'La': 57, 'Ce': 58, 'Pr': 59, 'Nd': 60,
+    'Pm': 61, 'Sm': 62, 'Eu': 63, 'Gd': 64, 'Tb': 65, 'Dy': 66, 'Ho': 67, 'Er': 68, 'Tm': 69, 'Yb': 70,
+    'Lu': 71, 'Hf': 72, 'Ta': 73, 'W': 74, 'Re': 75, 'Os': 76, 'Ir': 77, 'Pt': 78, 'Au': 79, 'Hg': 80,
+    'Tl': 81, 'Pb': 82, 'Bi': 83, 'Po': 84, 'At': 85, 'Rn': 86, 'Fr': 87, 'Ra': 88, 'Ac': 89, 'Th': 90,
+    'Pa': 91, 'U': 92, 'Np': 93, 'Pu': 94, 'Am': 95, 'Cm': 96, 'Bk': 97, 'Cf': 98, 'Es': 99, 'Fm': 100,
+    'Md': 101, 'No': 102, 'Lr': 103, 'Rf': 104, 'Db': 105, 'Sg': 106, 'Bh': 107, 'Hs': 108, 'Mt': 109,
+    'Ds': 110, 'Rg': 111, 'Cn': 112, 'Nh': 113, 'Fl': 114, 'Mc': 115, 'Lv': 116, 'Ts': 117, 'Og': 118
+}
+
 class Worker(QObject):
-    # 定义一个信号用来将计算结果传回主线程
     result_ready = pyqtSignal(object, object)
 
     def __init__(self, df_copy, spin_vals, list_vals):
@@ -37,14 +52,12 @@ class Worker(QObject):
             self.result_ready.emit(self.df['ion'].values, self.df['harmonic'].values)
             return
 
-        # 准备初始值
         y_init = np.mean(filtered_data[:,1])
         inital_means = np.array([[x, y_init] for x in x_init_list])
 
         gmm = GaussianMixture(n_components=len(x_init_list), means_init=inital_means, random_state=42)
         gmm.fit(filtered_data)
 
-        # 寻找与每个拟合中心最近的初始 x 索引，计算拟合中心与初始中心之间的映射关系
         fitted_means_x = gmm.means_[:,0]
         mapping_labels, mapping_harmonics = {}, {}
         for i in range(gmm.n_components):
@@ -59,7 +72,6 @@ class Worker(QObject):
         self.result_ready.emit(self.df['ion'].values, self.df['harmonic'].values)
 
 
-# 双 X 轴 sigma f/f 绘图与拟合控制窗口（精简为单一散点呈现）
 class SigmaPlotWindow(QMainWindow):
     def __init__(self, summary_df):
         super().__init__()
@@ -68,22 +80,18 @@ class SigmaPlotWindow(QMainWindow):
         self.summary_df = summary_df
         self.apply_global_font()
 
-        # 状态栏
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.coord_label = QLabel("m/q: 0.0000, γ: 0.0000, σf/f: 0.000000")
         self.status_bar.addPermanentWidget(self.coord_label)
 
-        # 布局构建
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
 
-        # 左侧：绘图控件
         self.plot_widget = pg.PlotWidget()
         main_layout.addWidget(self.plot_widget, stretch=4)
 
-        # 右侧：拟合控制面板
         fit_group = QGroupBox("Fitting Control")
         fit_layout = QGridLayout()
 
@@ -110,8 +118,6 @@ class SigmaPlotWindow(QMainWindow):
         main_layout.addWidget(fit_group, stretch=1)
 
         self.btn_fit.clicked.connect(self.run_fitting)
-
-        # 初始化图表
         self.init_plot()
 
     def apply_global_font(self):
@@ -137,7 +143,6 @@ class SigmaPlotWindow(QMainWindow):
         self.p_main.setLabel('bottom', 'm/q')
         self.p_main.setLabel('left', 'σf / f')
 
-        # 提取数据真实极值范围，用于建立 m/q 与 gamma 的物理映射
         self.mq_min = self.summary_df['m/q'].min()
         self.mq_max = self.summary_df['m/q'].max()
         self.gamma_min = self.summary_df['gamma'].min()
@@ -148,7 +153,6 @@ class SigmaPlotWindow(QMainWindow):
         if self.gamma_max == self.gamma_min:
             self.gamma_max += 1.0
 
-        # 创建顶部 ViewBox 与顶部 X 轴 (gamma)
         self.vb_top = pg.ViewBox()
         self.p_main.scene().addItem(self.vb_top)
         self.axis_top = pg.AxisItem('top')
@@ -157,11 +161,9 @@ class SigmaPlotWindow(QMainWindow):
         self.axis_top.linkToView(self.vb_top)
         self.vb_top.setYLink(self.p_main.vb)
 
-        # 保持几何区域对齐
         def update_views():
             self.vb_top.setGeometry(self.p_main.vb.sceneBoundingRect())
 
-        # 根据主 ViewBox (m/q) 的范围变化，实时映射顶部 ViewBox (gamma) 的真实范围
         def update_top_x_range():
             x0, x1 = self.p_main.vb.viewRange()[0]
             g0 = self.mq_to_gamma(x0)
@@ -170,19 +172,14 @@ class SigmaPlotWindow(QMainWindow):
 
         self.p_main.vb.sigResized.connect(update_views)
         self.p_main.vb.sigXRangeChanged.connect(update_top_x_range)
-
-        # 鼠标移动显示坐标
         self.p_main.scene().sigMouseMoved.connect(self.on_mouse_moved)
 
-        # 绘制散点数据
         self.plot_data()
 
     def mq_to_gamma(self, mq):
-        """m/q 到 gamma 的线性换算函数"""
         return self.gamma_min + (mq - self.mq_min) * (self.gamma_max - self.gamma_min) / (self.mq_max - self.mq_min)
 
     def gamma_to_mq(self, gamma):
-        """gamma 到 m/q 的线性换算函数"""
         return self.mq_min + (gamma - self.gamma_min) * (self.mq_max - self.mq_min) / (self.gamma_max - self.gamma_min)
 
     def plot_data(self):
@@ -193,7 +190,6 @@ class SigmaPlotWindow(QMainWindow):
         y_vals = self.summary_df['rel_sigma'].values
         ions = self.summary_df['ion'].values
 
-        # 仅在主视图 p_main 上绘制一套散点及标签（上轴 gamma 仅作为坐标标尺）
         scatter_bottom = pg.ScatterPlotItem(
             x=mq_vals, y=y_vals, size=12, symbol='o', 
             brush=pg.mkBrush('cyan'), pen=pg.mkPen('w', width=1)
@@ -205,7 +201,6 @@ class SigmaPlotWindow(QMainWindow):
             text_item.setPos(x, y)
             self.p_main.addItem(text_item)
 
-        # 设置主视口的范围，触发自动映射更新顶部 view
         dmq = self.mq_max - self.mq_min
         self.p_main.setXRange(self.mq_min - 0.1 * dmq, self.mq_max + 0.1 * dmq)
 
@@ -230,23 +225,18 @@ class SigmaPlotWindow(QMainWindow):
             x_data = self.summary_df['gamma'].values
             y_data = self.summary_df['rel_sigma'].values
 
-            # 拟合公式: y = |1/x^2 - 1/γt^2| * ΔΒρ/Βρ * 0.01 + const
             def fit_func(x, g_t, d_brp, const):
                 return np.abs(1.0 / (x**2) - 1.0 / (g_t**2)) * d_brp * 0.01 + const
 
             popt, _ = curve_fit(fit_func, x_data, y_data, p0=[init_gammat, init_dbrp, 0.0], maxfev=5000)
-            
             fit_g_t, fit_d_brp, fit_const = popt[0], popt[1], popt[2]
 
-            # 覆盖写入输入框
             self.spin_gammat.setValue(float(fit_g_t))
             self.spin_dbrp.setValue(float(fit_d_brp))
 
-            # 清理旧的拟合曲线
             if hasattr(self, 'fit_curve') and self.fit_curve in self.p_main.items:
                 self.p_main.removeItem(self.fit_curve)
 
-            # 在主图 p_main 上绘制拟合曲线（将 gamma 坐标转换为 m/q 绘制，确保对齐）
             gamma_min, gamma_max = x_data.min(), x_data.max()
             gamma_fit = np.linspace(gamma_min, gamma_max, 50)
             y_fit = fit_func(gamma_fit, fit_g_t, fit_d_brp, fit_const)
@@ -273,8 +263,9 @@ class FastLargeDataPlotter(QMainWindow):
         self.resize(1400, 900)
         self.roi = None
         self.sigma_win = None
-        self.label_items = []  # 存 (x_val, text_item) 供 ViewRange 变化时调整高度
-        self.ref_lines_and_texts = []  # 存 (line, text, q_val, x_val) 供 Q 过滤联动
+        self.label_items = []  
+        self.ref_lines_and_texts = [] 
+        self.files_loaded = False
         self.apply_global_font()
         
         self.init_ui()
@@ -304,26 +295,22 @@ class FastLargeDataPlotter(QMainWindow):
         self.win = pg.GraphicsLayoutWidget()
         layout.addWidget(self.win, 0, 0, 3, 1)
 
-        # 1. 主视觉图
         self.p_main = self.win.addPlot(row=0, col=0)
         self.p_main.showGrid(x=True, y=True, alpha=0.3)
         self.p_main.setLabel('left', 'Height Ion')
         
-        # 2. 右侧 Y 直方图
         self.p_hist_y = self.win.addPlot(row=0, col=1)
         self.p_hist_y.setFixedWidth(150)
         self.p_hist_y.setYLink(self.p_main)
         self.p_hist_y.getAxis('left').setStyle(showValues=False)
 
-        # 3. 下方 X 直方图
         self.p_hist_x = self.win.addPlot(row=1, col=0)
         self.p_hist_x.setFixedHeight(150)
         self.p_hist_x.setXLink(self.p_main)
 
-        # 4. 右上角文件控制区域（紧凑优化排版）
         file_group = QGroupBox("Data file Control")
         file_layout = QGridLayout()
-        file_layout.setVerticalSpacing(4)  # 缩小行与行之间的无用空隙
+        file_layout.setVerticalSpacing(4)
 
         self.btn_dataFile = QPushButton('Data file')
         file_layout.addWidget(self.btn_dataFile, 0, 0)
@@ -344,14 +331,12 @@ class FastLargeDataPlotter(QMainWindow):
 
         file_layout.addWidget(QLabel('More ref.:'), 3, 0)
         self.linedit_refIons = QLineEdit()
-        # 将示例长提示嵌入 placeholder，节省单独占用的整行竖向空间
         self.linedit_refIons.setPlaceholderText("{'195Os75(1)+': [308000756.01, 204, 324.786], ...}")
         file_layout.addWidget(self.linedit_refIons, 3, 1)
 
         self.btn_addRef = QPushButton('Add ref.')
         file_layout.addWidget(self.btn_addRef, 4, 1)
 
-        # Ref Ion 搜索补全与信息显示区域
         file_layout.addWidget(QLabel('Ion:'), 5, 0)
         self.linedit_search_ref_ion = QLineEdit()
         self.linedit_search_ref_ion.setPlaceholderText("e.g. 206Tl79(0)+")
@@ -367,10 +352,9 @@ class FastLargeDataPlotter(QMainWindow):
         self.textedit_ref_info = QTextEdit()
         self.textedit_ref_info.setReadOnly(True)
         self.textedit_ref_info.setLineWrapMode(QTextEdit.NoWrap)
-        self.textedit_ref_info.setFixedHeight(75)  # 保持 4 行紧凑高度
+        self.textedit_ref_info.setFixedHeight(75)
         file_layout.addWidget(self.textedit_ref_info, 7, 0, 1, 2)
 
-        # Q 直方图及范围筛选交互控件
         self.p_hist_q = pg.PlotWidget()
         self.p_hist_q.setFixedHeight(105)
         self.p_hist_q.showGrid(x=True, y=True, alpha=0.3)
@@ -378,17 +362,15 @@ class FastLargeDataPlotter(QMainWindow):
         self.p_hist_q.setLabel('left', 'Count')
         file_layout.addWidget(self.p_hist_q, 8, 0, 1, 2)
 
-        # 初始化 Q 范围的拖动线
         self.line_q_min = pg.InfiniteLine(angle=90, movable=True, pen=pg.mkPen('r', width=2))
         self.line_q_max = pg.InfiniteLine(angle=90, movable=True, pen=pg.mkPen('r', width=2))
         self.p_hist_q.addItem(self.line_q_min)
         self.p_hist_q.addItem(self.line_q_max)
 
-        # 下方单选控制及 Q Range 设定框
         q_control_layout = QHBoxLayout()
         q_control_layout.setContentsMargins(0, 0, 0, 0)
         self.radio_q_filter = QRadioButton("Enable Q Filter")
-        self.radio_q_filter.setChecked(True)  # 初始默认点选锁定
+        self.radio_q_filter.setChecked(True)
 
         self.spin_q_min = QSpinBox()
         self.spin_q_min.setRange(0, 200)
@@ -412,14 +394,12 @@ class FastLargeDataPlotter(QMainWindow):
         self.btn_addRef.clicked.connect(self.add_refIons)
         self.btn_search_ref_ion.clicked.connect(self.search_ref_ion_info)
 
-        # Q 范围逻辑联动绑定
         self.line_q_min.sigPositionChanged.connect(self.on_q_line_min_dragged)
         self.line_q_max.sigPositionChanged.connect(self.on_q_line_max_dragged)
         self.spin_q_min.valueChanged.connect(self.on_q_spin_min_changed)
         self.spin_q_max.valueChanged.connect(self.on_q_spin_max_changed)
         self.radio_q_filter.toggled.connect(self.on_q_filter_toggled)
 
-        # 5. 右中部直方图控制区域
         control_group = QGroupBox("Bins Control")
         control_layout = QGridLayout()
         control_layout.addWidget(QLabel("X Bins:"), 0, 0)
@@ -437,7 +417,6 @@ class FastLargeDataPlotter(QMainWindow):
         self.spin_y_bins.valueChanged.connect(self.update_histograms)
         self.p_main.sigRangeChanged.connect(self.update_histograms)
 
-        # 6. 右下角GMM控制区域
         gmmcontrol_group = QGroupBox("GMM Control")
         gmmcontrol_layout = QGridLayout()
 
@@ -506,7 +485,6 @@ class FastLargeDataPlotter(QMainWindow):
         layout.setColumnStretch(0, 4)
         layout.setColumnStretch(1, 1)
 
-        # 6. 状态栏
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.coord_label = QLabel("Freq: 0.00, Height: 0.0000")
@@ -530,7 +508,6 @@ class FastLargeDataPlotter(QMainWindow):
             self.df_data = pd.read_csv(self.linedit_dataFile.text())
             self.df_ref = pd.read_csv(self.linedit_refFile.text())
             
-            # [检查与补全]: 确保关键列存在
             for col in ['ion', 'harmonic', 'm/q', 'gamma']:
                 if col not in self.df_data.columns:
                     if col == 'ion':
@@ -548,22 +525,10 @@ class FastLargeDataPlotter(QMainWindow):
                         self.df_data[ref_col] = self.df_data[ref_col].combine_first(mapped_series)
             
             self.df_ref.columns = self.df_ref.columns.str.replace(r"\s*\(.*?\)", "", regex=True)
-            self.label_items = [] 
             self.current_ion_brushes = None
 
-            if 'ion' in self.df_ref.columns and 'harmonic' in self.df_ref.columns:
-                ref_items = []
-                for _, row in self.df_ref.dropna(subset=['ion', 'harmonic']).iterrows():
-                    ref_items.append(f"{row['ion']}, {int(row['harmonic'])}")
-                self.ion_completer.setModel(QStringListModel(ref_items, self))
-
-            if 'ion' in self.df_ref.columns:
-                unique_ions = sorted(list(self.df_ref['ion'].dropna().astype(str).unique()))
-                self.ref_ion_completer.setModel(QStringListModel(unique_ions, self))
-
+            self.refresh_completers()
             self.plot_reference_lines()
-
-            # 绘制 Q 直方图并触发主图 Dashline + Label 过滤联动
             self.plot_q_histogram()
 
             self.plot_data()
@@ -573,6 +538,7 @@ class FastLargeDataPlotter(QMainWindow):
                 self.update_ion_visualization()
 
             self.linedit_filename.setText(self.data_name)
+            self.files_loaded = True
         except Exception as e:
             QMessageBox.critical(
                 self,
@@ -582,11 +548,188 @@ class FastLargeDataPlotter(QMainWindow):
             )
             self.btn_fileLoad.setEnabled(True)
             self.btn_fileLoad.setText('Load files')
+            self.files_loaded = False
             return
         self.btn_fileLoad.setEnabled(True)
         self.btn_fileLoad.setText('Load files')
 
-    # 绘制 Q 直方图及其交互逻辑
+    def refresh_completers(self):
+        if not hasattr(self, 'df_ref') or self.df_ref is None or self.df_ref.empty:
+            return
+
+        if 'ion' in self.df_ref.columns and 'harmonic' in self.df_ref.columns:
+            ref_items = []
+            for _, row in self.df_ref.dropna(subset=['ion', 'harmonic']).iterrows():
+                ref_items.append(f"{row['ion']}, {int(row['harmonic'])}")
+            self.ion_completer.setModel(QStringListModel(ref_items, self))
+
+        if 'ion' in self.df_ref.columns:
+            unique_ions = sorted(list(self.df_ref['ion'].dropna().astype(str).unique()))
+            self.ref_ion_completer.setModel(QStringListModel(unique_ions, self))
+
+    # 新增离子 (Add ref.) 的全逻辑增强：支持重复离子的覆写替换与显式提示
+    def add_refIons(self):
+        if not getattr(self, 'files_loaded', False) or self.df_ref is None or self.df_data is None:
+            QMessageBox.warning(self, "Warning", "Please load files first before adding reference ions!")
+            return
+
+        self.btn_addRef.setEnabled(False)
+        self.btn_addRef.setText('Adding ions ...')
+
+        try:
+            input_text = self.linedit_refIons.text().strip()
+            if not input_text:
+                QMessageBox.warning(self, "Warning", "Please input reference ions dict!")
+                self.btn_addRef.setEnabled(True); self.btn_addRef.setText('Add ref.')
+                return
+
+            list_vals = ast.literal_eval(input_text)
+            if not isinstance(list_vals, dict):
+                raise ValueError("Input format must be a python dict.")
+
+            data_f_min = self.df_data['peak_pos'].min()
+            data_f_max = self.df_data['peak_pos'].max()
+
+            q_col = next((c for c in ['Q', 'q'] if c in self.df_ref.columns), 'Q')
+
+            new_rows = []
+            replaced_ions = []
+            added_ions = []
+
+            for ion_str, ion_info in list_vals.items():
+                # 记录替换与新增状态
+                if (self.df_ref['ion'].astype(str) == ion_str).any():
+                    replaced_ions.append(ion_str)
+                    # 覆写关键：从 self.df_ref 中剔除原来存在的所有同名旧离子行
+                    self.df_ref = self.df_ref[self.df_ref['ion'].astype(str) != ion_str]
+                else:
+                    added_ions.append(ion_str)
+
+                f_hz = float(ion_info[0])
+                h_in = int(ion_info[1])
+                sig_hz = float(ion_info[2])
+
+                match = re.match(r"^(\d+)([A-Za-z]+)(\d+)", ion_str)
+                if not match:
+                    QMessageBox.critical(self, "Ion Format Error", f"Cannot parse ion pattern '{ion_str}'!\nExpected format like '195Os75(1)+'.")
+                    self.btn_addRef.setEnabled(True); self.btn_addRef.setText('Add ref.')
+                    return
+
+                a_val = int(match.group(1))
+                element_symbol = match.group(2)
+                q_val = int(match.group(3))
+
+                if element_symbol not in ELEMENT_Z_TABLE:
+                    QMessageBox.critical(self, "Element Error", f"Unknown element symbol '{element_symbol}' in ion '{ion_str}'!\nOperation cancelled.")
+                    self.btn_addRef.setEnabled(True); self.btn_addRef.setText('Add ref.')
+                    return
+
+                z_val = ELEMENT_Z_TABLE[element_symbol]
+                n_val = a_val - z_val
+
+                diff = z_val - q_val
+                type_map = {0: 'bare', 1: 'H-like', 2: 'He-like', 3: 'Li-like', 4: 'Be-like', 5: 'B-like'}
+                type_str = type_map.get(diff, '')
+
+                rev_freq_mhz = f_hz / (h_in * 1e6)
+
+                min_h = int(np.ceil(data_f_min / (rev_freq_mhz * 1e6)))
+                max_h = int(np.floor(data_f_max / (rev_freq_mhz * 1e6)))
+                valid_harmonics = range(min_h, max_h + 1) if min_h <= max_h else [h_in]
+
+                for h in valid_harmonics:
+                    p_loc_khz = (h * rev_freq_mhz * 1e6) / 1000.0
+                    p_sig_khz = (sig_hz * (h / h_in)) / 1000.0
+
+                    row_dict = {
+                        'ion': ion_str,
+                        'element': element_symbol,
+                        q_col: q_val,
+                        'N': n_val,
+                        'Z': z_val,
+                        'peak_loc': p_loc_khz,
+                        'peak_sig': p_sig_khz,
+                        'harmonic': h,
+                        'rev_freq': rev_freq_mhz,
+                        'half_life': np.nan,
+                        'yield': np.nan,
+                        'type': type_str,
+                        'weight': np.nan,
+                        'peak_max': np.nan,
+                        'source': 'new',
+                        'm/q': a_val / q_val if q_val != 0 else np.nan
+                    }
+                    new_rows.append(row_dict)
+
+            # 将解析导出的新行合并追加进数据库
+            df_new = pd.DataFrame(new_rows)
+            self.df_ref = pd.concat([self.df_ref, df_new], ignore_index=True)
+
+            # 刷新 UI 状态
+            self.refresh_completers()
+            self.plot_reference_lines()
+            self.plot_q_histogram()
+
+            # 构建明确的操作完成反馈提示消息
+            msg = "Successfully processed reference ions!\n"
+            if replaced_ions:
+                msg += f"\n• Replaced existing ion(s):\n  {', '.join(replaced_ions)}"
+            if added_ions:
+                msg += f"\n• Added new ion(s):\n  {', '.join(added_ions)}"
+
+            QMessageBox.information(self, "Success", msg)
+            self.linedit_refIons.clear()
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Input format error",
+                f"Failed to add ref ions!\n\nError: {e}\n\nPlease check format example:\n{{'195Os75(1)+':[308000756.01, 204, 324.786]}}",
+                QMessageBox.Ok
+            )
+        finally:
+            self.btn_addRef.setEnabled(True)
+            self.btn_addRef.setText('Add ref.')
+
+    def plot_reference_lines(self):
+        if hasattr(self, 'ref_lines_and_texts'):
+            for line, text, _, _ in self.ref_lines_and_texts:
+                if line in self.p_main.items:
+                    self.p_main.removeItem(line)
+                if text in self.p_main.items:
+                    self.p_main.removeItem(text)
+
+        self.ref_lines_and_texts = []
+        self.label_items = []
+
+        if not hasattr(self, 'df_ref') or self.df_ref is None or self.df_ref.empty:
+            return
+
+        q_col = next((c for c in ['Q', 'q'] if c in self.df_ref.columns), None)
+
+        # 获取当前的 Y 轴视角范围供放置 TextItem 顶端坐标
+        y_range = self.p_main.viewRange()[1]
+        y_label_pos = y_range[1] - (y_range[1] - y_range[0]) * 0.05
+
+        for _, row in self.df_ref.iterrows():
+            x_val = row['peak_loc'] * 1e3
+            q_val = int(row[q_col]) if q_col and pd.notna(row[q_col]) else 0
+            
+            p_sig = row['peak_sig'] * 1e3 if pd.notna(row.get('peak_sig')) else 0.0
+            ion_label = f"{str(row['ion'])}\nsigma: {p_sig:.3f} Hz\nh = {int(row['harmonic']):d}"
+            
+            line = pg.InfiniteLine(pos=x_val, angle=90, pen=pg.mkPen('lightgray', width=1.5, style=Qt.DashLine))
+            self.p_main.addItem(line)
+
+            text = pg.TextItem(text=ion_label, color='lightgray', anchor=(0, 0))
+            text.setPos(x_val, y_label_pos)
+            self.p_main.addItem(text)
+            
+            self.label_items.append((x_val, text))
+            self.ref_lines_and_texts.append((line, text, q_val, x_val))
+
+        self.dynamic_labels = []
+
     def plot_q_histogram(self):
         self.p_hist_q.clear()
         self.p_hist_q.addItem(self.line_q_min)
@@ -596,7 +739,6 @@ class FastLargeDataPlotter(QMainWindow):
         if q_col is None:
             return
 
-        # 唯一离子过滤后再统计 Q
         df_unique_ions = self.df_ref.drop_duplicates(subset=['ion'])
         q_series = df_unique_ions[q_col].dropna().astype(int)
 
@@ -625,7 +767,6 @@ class FastLargeDataPlotter(QMainWindow):
         self.line_q_min.setValue(q_min)
         self.line_q_max.setValue(q_max)
 
-        # 恢复默认点选状态：控件 disabled，触发主图根据 Q 显示对应参考离子和线
         self.radio_q_filter.setChecked(True)
         self.on_q_filter_toggled(True)
 
@@ -648,13 +789,11 @@ class FastLargeDataPlotter(QMainWindow):
         self.line_q_max.setValue(val)
 
     def on_q_filter_toggled(self, checked):
-        # 按钮选中：禁用选择框与竖线拖动，同时联动主图 Line 与 TextItem
         self.spin_q_min.setEnabled(not checked)
         self.spin_q_max.setEnabled(not checked)
         self.line_q_min.setMovable(not checked)
         self.line_q_max.setMovable(not checked)
 
-        # 刷新主图的 Dashline 及 Text Label 呈现
         self.update_main_plot_ref_lines()
 
     def update_main_plot_ref_lines(self):
@@ -664,20 +803,21 @@ class FastLargeDataPlotter(QMainWindow):
         is_filtered = self.radio_q_filter.isChecked()
         q_start = self.spin_q_min.value()
         q_end = self.spin_q_max.value()
+        x_range = self.p_main.viewRange()[0]
 
         for line, text, q_val, x_val in self.ref_lines_and_texts:
+            in_x_view = (x_range[0] <= x_val <= x_range[1])
+
             if is_filtered:
-                # 勾选状态下：仅保留 Q 在范围内的离子的 Dashline 和 离子 Label
-                if q_start <= q_val <= q_end:
+                if (q_start <= q_val <= q_end) and in_x_view:
                     line.setVisible(True)
                     text.setVisible(True)
                 else:
                     line.setVisible(False)
                     text.setVisible(False)
             else:
-                # 未勾选状态：显示所有 Dashline 与 Label
-                line.setVisible(True)
-                text.setVisible(True)
+                line.setVisible(in_x_view)
+                text.setVisible(in_x_view)
 
     def search_ref_ion_info(self):
         ion_name = self.linedit_search_ref_ion.text().strip()
@@ -883,71 +1023,6 @@ class FastLargeDataPlotter(QMainWindow):
         curr_dict[ion_name] = [freq_hz, h_val]
         self.linedit_ionfreqs.setText(str(curr_dict))
         self.linedit_search_ion.clear()
-
-    def add_refIons(self):
-        self.btn_addRef.setEnabled(False)
-        self.btn_addRef.setText('Adding ions ...')
-        try:
-            list_vals = ast.literal_eval(self.linedit_refIons.text())
-            for ion, ion_info in list_vals.items():
-                x_val = ion_info[0]
-                ion_label = ion + '\nsigma: {:.3f} Hz\nh = {:d}'.format(ion_info[-1], ion_info[1])
-
-                line = pg.InfiniteLine(pos=x_val, angle=90, pen=pg.mkPen('lightgray', width=1.5, style=Qt.DashLine))
-                self.p_main.addItem(line)
-                text = pg.TextItem(text=ion_label, color='lightgray', anchor=(0, 0))
-                self.p_main.addItem(text)
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Input format error",
-                f"Input dict format error! \n\nError: {e}\n\nPlease check and input again."+"\n\n\nExample: {'195Os75(1)+':[308000756.01, 204, 324.786], ...}",
-                QMessageBox.Ok
-            )
-            self.btn_addRef.setEnabled(True)
-            self.btn_addRef.setText('Add ref.')
-            return
-            
-        try:
-            self.label_items.append((x_val, text))
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Adding error",
-                f"Adding error! \n\nNeeded to load files first!",
-                QMessageBox.Ok
-            )
-            self.btn_addRef.setEnabled(True)
-            self.btn_addRef.setText('Add ref.')
-
-        self.btn_addRef.setEnabled(True)
-        self.btn_addRef.setText('Add ref.')
-
-    def plot_reference_lines(self):
-        # 清理旧的线段和文本对象
-        if hasattr(self, 'ref_lines_and_texts'):
-            for line, text, _, _ in self.ref_lines_and_texts:
-                self.p_main.removeItem(line)
-                self.p_main.removeItem(text)
-        self.ref_lines_and_texts = []
-
-        q_col = next((c for c in ['Q', 'q'] if c in self.df_ref.columns), None)
-
-        for _, row in self.df_ref.iterrows():
-            x_val = row['peak_loc'] * 1e3
-            q_val = int(row[q_col]) if q_col and pd.notna(row[q_col]) else 0
-            ion_label = row['ion'] + '\nsigma: {:.3f} Hz\nh = {:d}'.format(row['peak_sig'] * 1e3, int(row['harmonic']))
-            
-            line = pg.InfiniteLine(pos=x_val, angle=90, pen=pg.mkPen('lightgray', width=1.5, style=Qt.DashLine))
-            self.p_main.addItem(line)
-
-            text = pg.TextItem(text=ion_label, color='lightgray', anchor=(0, 0))
-            self.p_main.addItem(text)
-            
-            self.label_items.append((x_val, text))
-            self.ref_lines_and_texts.append((line, text, q_val, x_val))
-
-        self.dynamic_labels = []
 
     def plot_data(self):
         times = self.df_data['exist_time'].values
@@ -1202,12 +1277,8 @@ class FastLargeDataPlotter(QMainWindow):
 
         for x_val, text_item in self.label_items:
             text_item.setPos(x_val, y_label_pos)
-            # 在视角范围内的标签才维持可视
-            if x_val > x_range[0] and x_val < x_range[1]:
-                # 若使用了 Q 过滤逻辑，仍然优先受限于 update_main_plot_ref_lines 的结果
-                pass
-            else:
-                text_item.setVisible(False)
+
+        self.update_main_plot_ref_lines()
 
         mask = (self.df_data['peak_pos'] >= x_range[0]) & (self.df_data['peak_pos'] <= x_range[1]) & \
                (self.df_data['height_ion'] >= y_range[0]) & (self.df_data['height_ion'] <= y_range[1])
