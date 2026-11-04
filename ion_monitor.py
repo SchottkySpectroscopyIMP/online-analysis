@@ -48,10 +48,19 @@ class Worker(QObject):
         subset = self.df.loc[mask, ['peak_pos', 'height_ion']]
         filtered_data = subset.values
 
+        # 1. 区域内没有数据点，直接返回原值
         if len(filtered_data) == 0:
             self.result_ready.emit(self.df['ion'].values, self.df['harmonic'].values)
             return
 
+        # 2. 【核心优化】：若只传入了 1 种离子，直接将框选范围内的所有点强行赋值为此离子，不运行 GMM
+        if len(x_init_list) == 1:
+            self.df.loc[mask, 'ion'] = labels_name[0]
+            self.df.loc[mask, 'harmonic'] = labels_harmonic[0]
+            self.result_ready.emit(self.df['ion'].values, self.df['harmonic'].values)
+            return
+
+        # 3. 正常运行多离子 GMM 拟合
         y_init = np.mean(filtered_data[:,1])
         inital_means = np.array([[x, y_init] for x in x_init_list])
 
@@ -567,7 +576,6 @@ class FastLargeDataPlotter(QMainWindow):
             unique_ions = sorted(list(self.df_ref['ion'].dropna().astype(str).unique()))
             self.ref_ion_completer.setModel(QStringListModel(unique_ions, self))
 
-    # 新增离子 (Add ref.) 的全逻辑增强：支持重复离子的覆写替换与显式提示
     def add_refIons(self):
         if not getattr(self, 'files_loaded', False) or self.df_ref is None or self.df_data is None:
             QMessageBox.warning(self, "Warning", "Please load files first before adding reference ions!")
@@ -597,10 +605,8 @@ class FastLargeDataPlotter(QMainWindow):
             added_ions = []
 
             for ion_str, ion_info in list_vals.items():
-                # 记录替换与新增状态
                 if (self.df_ref['ion'].astype(str) == ion_str).any():
                     replaced_ions.append(ion_str)
-                    # 覆写关键：从 self.df_ref 中剔除原来存在的所有同名旧离子行
                     self.df_ref = self.df_ref[self.df_ref['ion'].astype(str) != ion_str]
                 else:
                     added_ions.append(ion_str)
@@ -661,16 +667,13 @@ class FastLargeDataPlotter(QMainWindow):
                     }
                     new_rows.append(row_dict)
 
-            # 将解析导出的新行合并追加进数据库
             df_new = pd.DataFrame(new_rows)
             self.df_ref = pd.concat([self.df_ref, df_new], ignore_index=True)
 
-            # 刷新 UI 状态
             self.refresh_completers()
             self.plot_reference_lines()
             self.plot_q_histogram()
 
-            # 构建明确的操作完成反馈提示消息
             msg = "Successfully processed reference ions!\n"
             if replaced_ions:
                 msg += f"\n• Replaced existing ion(s):\n  {', '.join(replaced_ions)}"
@@ -707,7 +710,6 @@ class FastLargeDataPlotter(QMainWindow):
 
         q_col = next((c for c in ['Q', 'q'] if c in self.df_ref.columns), None)
 
-        # 获取当前的 Y 轴视角范围供放置 TextItem 顶端坐标
         y_range = self.p_main.viewRange()[1]
         y_label_pos = y_range[1] - (y_range[1] - y_range[0]) * 0.05
 
