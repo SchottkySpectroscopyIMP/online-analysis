@@ -893,52 +893,85 @@ class FastLargeDataPlotter(QMainWindow):
         self.textedit_ref_info.setPlainText(res_text.strip())
 
     def update_ion_visualization(self):
-        real_unique_ions = [ion for ion in self.df_data['ion'].unique() if str(ion).strip() != '']
-        num_colors = len(real_unique_ions)
-        
-        if num_colors > 0:
-            colors = [pg.intColor(i, num_colors) for i in range(num_colors)]
-            ion_color_map = dict(zip(real_unique_ions, colors))
+        # 1. 彻底清理主图上所有旧的动态离子标签 (TextItem)
+        if hasattr(self, 'dynamic_labels') and self.dynamic_labels:
+            for old_text_item in self.dynamic_labels:
+                if old_text_item in self.p_main.items:
+                    self.p_main.removeItem(old_text_item)
+            self.dynamic_labels.clear()
         else:
-            ion_color_map = {}
+            self.dynamic_labels = []
 
-        self.current_ion_brushes = [
-            pg.mkBrush(ion_color_map[str(ion)]) if str(ion).strip() != '' else None 
-            for ion in self.df_data['ion']
-        ]
+        if not hasattr(self, 'df_data') or self.df_data is None or self.df_data.empty:
+            return
 
+        # 2. 仅提取当前 df_data 中【实际已经被标记】的有效离子列表
+        real_unique_ions = sorted([str(ion).strip() for ion in self.df_data['ion'].unique() if str(ion).strip() != ''])
+
+        # 3. 构建高对比度离散颜色映射表（采用黄金分割步长跳跃 Hue，避免连续名称颜色接近）
+        num_classified = len(real_unique_ions)
+        ion_color_map = {}
+
+        GOLDEN_RATIO_CONJUGATE = 0.618033988749895  # 黄金分割比，使颜色分布极度离散
+
+        for i, ion_str in enumerate(real_unique_ions):
+            # 通过黄金分割跳跃生成 0~360 度的 Hue，相邻索引颜色差异巨大
+            hue = int(((i * GOLDEN_RATIO_CONJUGATE) % 1.0) * 360.0)
+            color = pg.mkColor('w')
+            color.setHsv(hue, 255, 255)
+            ion_color_map[ion_str] = color
+
+        # 4. 刷新数据点的填充颜色刷 (Brush)
+        self.current_ion_brushes = []
+        for ion in self.df_data['ion']:
+            ion_str = str(ion).strip()
+            if ion_str != '' and ion_str in ion_color_map:
+                self.current_ion_brushes.append(pg.mkBrush(ion_color_map[ion_str]))
+            else:
+                self.current_ion_brushes.append(None)
+
+        # 5. 刷新散点图表颜色的呈现
         self.on_colorbar_levels_changed()
 
-        if not hasattr(self, 'dynamic_labels'):
-            self.dynamic_labels = []
-        for old_text_item in self.dynamic_labels:
-            self.p_main.removeItem(old_text_item)
-        self.dynamic_labels.clear()
-
+        # 6. 重新绘制离子标签（精细化谐波分组与去重，防止叠加）
         for ion_name in real_unique_ions:
             df_sub = self.df_data[self.df_data['ion'] == ion_name]
             if df_sub.empty:
                 continue
-            
-            unique_harmonics = df_sub['harmonic'].dropna().unique()
-            if len(unique_harmonics) > 0:
-                for h in unique_harmonics:
+
+            ion_color = ion_color_map.get(ion_name, pg.mkColor('w'))
+
+            # 清理并转换谐波列表，确保强类型转换为 int 并严格去重
+            valid_harmonics = []
+            for h in df_sub['harmonic'].dropna().unique():
+                try:
+                    valid_harmonics.append(int(h))
+                except (ValueError, TypeError):
+                    pass
+            valid_harmonics = sorted(list(set(valid_harmonics)))
+
+            if len(valid_harmonics) > 0:
+                for h in valid_harmonics:
+                    # 使用 float/int 兼容匹配
                     _df_sub = df_sub[df_sub['harmonic'] == h]
+                    if _df_sub.empty:
+                        continue
                     x_center = _df_sub['peak_pos'].mean()
                     y_position = _df_sub['height_ion'].min()
-                    
-                    text_item = pg.TextItem(text=str(ion_name), color=ion_color_map[ion_name], anchor=(0.5, 0))
+
+                    text_item = pg.TextItem(text=str(ion_name), color=ion_color, anchor=(0.5, 0))
                     text_item.setPos(x_center, y_position)
                     self.p_main.addItem(text_item)
                     self.dynamic_labels.append(text_item)
             else:
+                # 没有任何有效谐波数值时，作为整体绘制单个标签
                 x_center = df_sub['peak_pos'].mean()
                 y_position = df_sub['height_ion'].min()
-                
-                text_item = pg.TextItem(text=str(ion_name), color=ion_color_map[ion_name], anchor=(0.5, 0))
+
+                text_item = pg.TextItem(text=str(ion_name), color=ion_color, anchor=(0.5, 0))
                 text_item.setPos(x_center, y_position)
                 self.p_main.addItem(text_item)
-                self.dynamic_labels.append(text_item)
+                self.dynamic_labels.append(text_item) 
 
     def on_roi_toggled(self, checked):
         if checked:
