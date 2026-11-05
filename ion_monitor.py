@@ -13,6 +13,11 @@ from PyQt5.QtGui import QFont
 from sklearn.mixture import GaussianMixture
 from scipy.spatial.distance import cdist
 from scipy.optimize import curve_fit
+import warnings
+
+# 过滤 loky/joblib 关于物理核心数检测的 UserWarning 警告
+warnings.filterwarnings('ignore', category=UserWarning, module='joblib')
+warnings.filterwarnings('ignore', message='.*Could not find the number of physical cores.*')
 
 # 内置常用元素周期表 (Element -> Z)
 ELEMENT_Z_TABLE = {
@@ -908,14 +913,11 @@ class FastLargeDataPlotter(QMainWindow):
         # 2. 仅提取当前 df_data 中【实际已经被标记】的有效离子列表
         real_unique_ions = sorted([str(ion).strip() for ion in self.df_data['ion'].unique() if str(ion).strip() != ''])
 
-        # 3. 构建高对比度离散颜色映射表（采用黄金分割步长跳跃 Hue，避免连续名称颜色接近）
-        num_classified = len(real_unique_ions)
+        # 3. 构建高对比度离散颜色映射表（黄金分割步长，保证相邻索引颜色极大区分）
         ion_color_map = {}
-
-        GOLDEN_RATIO_CONJUGATE = 0.618033988749895  # 黄金分割比，使颜色分布极度离散
+        GOLDEN_RATIO_CONJUGATE = 0.618033988749895
 
         for i, ion_str in enumerate(real_unique_ions):
-            # 通过黄金分割跳跃生成 0~360 度的 Hue，相邻索引颜色差异巨大
             hue = int(((i * GOLDEN_RATIO_CONJUGATE) % 1.0) * 360.0)
             color = pg.mkColor('w')
             color.setHsv(hue, 255, 255)
@@ -933,29 +935,33 @@ class FastLargeDataPlotter(QMainWindow):
         # 5. 刷新散点图表颜色的呈现
         self.on_colorbar_levels_changed()
 
-        # 6. 重新绘制离子标签（精细化谐波分组与去重，防止叠加）
+        # 6. 重新绘制离子标签（核心改进：谐波标准化清洗与重叠中心合并）
         for ion_name in real_unique_ions:
-            df_sub = self.df_data[self.df_data['ion'] == ion_name]
+            df_sub = self.df_data[self.df_data['ion'] == ion_name].copy()
             if df_sub.empty:
                 continue
 
             ion_color = ion_color_map.get(ion_name, pg.mkColor('w'))
 
-            # 清理并转换谐波列表，确保强类型转换为 int 并严格去重
-            valid_harmonics = []
-            for h in df_sub['harmonic'].dropna().unique():
+            # 将 harmonic 统一安全转换为纯整数 int
+            harmonics_clean = []
+            for h in df_sub['harmonic'].dropna().values:
                 try:
-                    valid_harmonics.append(int(h))
+                    harmonics_clean.append(int(round(float(h))))
                 except (ValueError, TypeError):
                     pass
-            valid_harmonics = sorted(list(set(valid_harmonics)))
+            unique_h_list = sorted(list(set(harmonics_clean)))
 
-            if len(valid_harmonics) > 0:
-                for h in valid_harmonics:
-                    # 使用 float/int 兼容匹配
-                    _df_sub = df_sub[df_sub['harmonic'] == h]
+            # 如果解析出了有效的不同谐波分组
+            if len(unique_h_list) > 0:
+                for h in unique_h_list:
+                    # 使用数值容差匹配，解决 float vs int 的不匹配问题
+                    _df_sub = df_sub[df_sub['harmonic'].apply(
+                        lambda x: pd.notna(x) and int(round(float(x))) == h if str(x).replace('.','',1).isdigit() else False
+                    )]
                     if _df_sub.empty:
                         continue
+                    
                     x_center = _df_sub['peak_pos'].mean()
                     y_position = _df_sub['height_ion'].min()
 
@@ -964,7 +970,7 @@ class FastLargeDataPlotter(QMainWindow):
                     self.p_main.addItem(text_item)
                     self.dynamic_labels.append(text_item)
             else:
-                # 没有任何有效谐波数值时，作为整体绘制单个标签
+                # 若无任何谐波标定，整个离子团只绘制一个整体中心标签
                 x_center = df_sub['peak_pos'].mean()
                 y_position = df_sub['height_ion'].min()
 
@@ -1187,14 +1193,21 @@ class FastLargeDataPlotter(QMainWindow):
 
     def gmm_end(self, possible_ion_range, possible_harmonic_range):
         self.df_data['ion'] = possible_ion_range
-        self.df_data['harmonic'] = possible_harmonic_range
+        
+        # 保证 harmonic 为干净的 int/NaN 混合类型
+        cleaned_h = []
+        for val in possible_harmonic_range:
+            try:
+                cleaned_h.append(int(round(float(val))))
+            except (ValueError, TypeError):
+                cleaned_h.append(np.nan)
+                
+        self.df_data['harmonic'] = cleaned_h
         
         self.update_ion_visualization()
-
         self.btn_gmm.setEnabled(True)
         self.btn_gmm.setText('GMM run')
-        
-        self.linedit_ionfreqs.setText('{}')
+        self.linedit_ionfreqs.setText('{}') 
 
     def result_clear(self):
         self.btn_clear.setEnabled(False)
