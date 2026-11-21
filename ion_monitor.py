@@ -7,7 +7,8 @@ import pandas as pd
 import pyqtgraph as pg
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QStatusBar, 
                             QPushButton, QMessageBox, QDoubleSpinBox, QLineEdit, QFileDialog,
-                             QHBoxLayout, QSpinBox, QLabel, QGroupBox, QGridLayout, QCompleter, QRadioButton, QTextEdit)
+                             QHBoxLayout, QSpinBox, QLabel, QGroupBox, QGridLayout, QCompleter, 
+                             QRadioButton, QTextEdit, QCheckBox)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject, QStringListModel
 from PyQt5.QtGui import QFont
 from sklearn.mixture import GaussianMixture
@@ -274,12 +275,14 @@ class FastLargeDataPlotter(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Large Scale Data Visualization")
-        self.resize(1400, 900)
+        self.resize(1400, 950)
         self.roi = None
         self.sigma_win = None
         self.label_items = []  
         self.ref_lines_and_texts = [] 
         self.files_loaded = False
+        self.spec_freq = None
+        self.spec_psd = None
         self.apply_global_font()
         
         self.init_ui()
@@ -309,6 +312,7 @@ class FastLargeDataPlotter(QMainWindow):
         self.win = pg.GraphicsLayoutWidget()
         layout.addWidget(self.win, 0, 0, 3, 1)
 
+        # Row 0: 主散点图 + 右侧 Y 直方图
         self.p_main = self.win.addPlot(row=0, col=0)
         self.p_main.showGrid(x=True, y=True, alpha=0.3)
         self.p_main.setLabel('left', 'Height Ion')
@@ -318,10 +322,24 @@ class FastLargeDataPlotter(QMainWindow):
         self.p_hist_y.setYLink(self.p_main)
         self.p_hist_y.getAxis('left').setStyle(showValues=False)
 
+        # Row 1: X 轴直方图 (sharex)
         self.p_hist_x = self.win.addPlot(row=1, col=0)
-        self.p_hist_x.setFixedHeight(150)
+        self.p_hist_x.setFixedHeight(140)
         self.p_hist_x.setXLink(self.p_main)
+        self.p_hist_x.setLabel('left', 'Count')
 
+        # Row 2: 最下方新增 Spec 频谱图 (sharex)
+        self.p_spec = self.win.addPlot(row=2, col=0)
+        self.p_spec.setFixedHeight(150)
+        self.p_spec.setXLink(self.p_main)
+        self.p_spec.showGrid(x=True, y=True, alpha=0.3)
+        self.p_spec.setLabel('bottom', 'Frequency', units='Hz')
+        self.p_spec.setLabel('left', 'PSD (log10)')
+        self.curve_spec = self.p_spec.plot(pen=pg.mkPen('#00BFFF', width=1))
+        self.curve_spec.setDownsampling(ds=True, auto=True, method='peak')
+        self.curve_spec.setClipToView(True)
+
+        # 右侧控制面板: Data file Control
         file_group = QGroupBox("Data file Control")
         file_layout = QGridLayout()
         file_layout.setVerticalSpacing(4)
@@ -340,41 +358,56 @@ class FastLargeDataPlotter(QMainWindow):
         self.linedit_refFile.setPlaceholderText("Please select .csv File ...")
         file_layout.addWidget(self.linedit_refFile, 1, 1)
 
-        self.btn_fileLoad = QPushButton('Load files')
-        file_layout.addWidget(self.btn_fileLoad, 2, 1)
+        # 新增：Spec file (.npz) 及 Log scale 勾选框
+        self.btn_specFile = QPushButton('Spec file')
+        file_layout.addWidget(self.btn_specFile, 2, 0)
+        spec_row_layout = QHBoxLayout()
+        spec_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.linedit_specFile = QLineEdit()
+        self.linedit_specFile.setReadOnly(True)
+        self.linedit_specFile.setPlaceholderText("Optional .npz file ...")
+        self.cb_spec_log = QCheckBox("Log scale")
+        self.cb_spec_log.setChecked(True)
+        spec_row_layout.addWidget(self.linedit_specFile)
+        spec_row_layout.addWidget(self.cb_spec_log)
+        file_layout.addLayout(spec_row_layout, 2, 1)
 
-        file_layout.addWidget(QLabel('More ref.:'), 3, 0)
+        self.btn_fileLoad = QPushButton('Load files')
+        file_layout.addWidget(self.btn_fileLoad, 3, 1)
+
+        file_layout.addWidget(QLabel('More ref.:'), 4, 0)
         self.linedit_refIons = QLineEdit()
         self.linedit_refIons.setPlaceholderText("{'195Os75(1)+': [308000756.01, 204, 324.786], ...}")
-        file_layout.addWidget(self.linedit_refIons, 3, 1)
+        file_layout.addWidget(self.linedit_refIons, 4, 1)
 
         self.btn_addRef = QPushButton('Add ref.')
-        file_layout.addWidget(self.btn_addRef, 4, 1)
+        file_layout.addWidget(self.btn_addRef, 5, 1)
 
-        file_layout.addWidget(QLabel('Ion:'), 5, 0)
+        file_layout.addWidget(QLabel('Ion:'), 6, 0)
         self.linedit_search_ref_ion = QLineEdit()
         self.linedit_search_ref_ion.setPlaceholderText("e.g. 206Tl79(0)+")
         self.ref_ion_completer = QCompleter(self)
         self.ref_ion_completer.setFilterMode(Qt.MatchContains)
         self.ref_ion_completer.setCaseSensitivity(Qt.CaseInsensitive)
         self.linedit_search_ref_ion.setCompleter(self.ref_ion_completer)
-        file_layout.addWidget(self.linedit_search_ref_ion, 5, 1)
+        file_layout.addWidget(self.linedit_search_ref_ion, 6, 1)
 
         self.btn_search_ref_ion = QPushButton('Search ion')
-        file_layout.addWidget(self.btn_search_ref_ion, 6, 1)
+        file_layout.addWidget(self.btn_search_ref_ion, 7, 1)
 
+        # 需求1：高度从 75 增加至 100，确保至少完整显示 3 行以上内容
         self.textedit_ref_info = QTextEdit()
         self.textedit_ref_info.setReadOnly(True)
         self.textedit_ref_info.setLineWrapMode(QTextEdit.NoWrap)
-        self.textedit_ref_info.setFixedHeight(75)
-        file_layout.addWidget(self.textedit_ref_info, 7, 0, 1, 2)
+        self.textedit_ref_info.setFixedHeight(100)
+        file_layout.addWidget(self.textedit_ref_info, 8, 0, 1, 2)
 
         self.p_hist_q = pg.PlotWidget()
-        self.p_hist_q.setFixedHeight(105)
+        self.p_hist_q.setFixedHeight(100)
         self.p_hist_q.showGrid(x=True, y=True, alpha=0.3)
         self.p_hist_q.setLabel('bottom', 'Q')
         self.p_hist_q.setLabel('left', 'Count')
-        file_layout.addWidget(self.p_hist_q, 8, 0, 1, 2)
+        file_layout.addWidget(self.p_hist_q, 9, 0, 1, 2)
 
         self.line_q_min = pg.InfiniteLine(angle=90, movable=True, pen=pg.mkPen('r', width=2))
         self.line_q_max = pg.InfiniteLine(angle=90, movable=True, pen=pg.mkPen('r', width=2))
@@ -397,13 +430,15 @@ class FastLargeDataPlotter(QMainWindow):
         q_control_layout.addWidget(QLabel("Q max:"))
         q_control_layout.addWidget(self.spin_q_max)
 
-        file_layout.addLayout(q_control_layout, 9, 0, 1, 2)
+        file_layout.addLayout(q_control_layout, 10, 0, 1, 2)
 
         file_group.setLayout(file_layout)
         layout.addWidget(file_group, 0, 1)
 
         self.btn_dataFile.clicked.connect(self.select_dataFile)
         self.btn_refFile.clicked.connect(self.select_refFlie)
+        self.btn_specFile.clicked.connect(self.select_specFile)
+        self.cb_spec_log.toggled.connect(self.update_spec_plot)
         self.btn_fileLoad.clicked.connect(self.load_data)
         self.btn_addRef.clicked.connect(self.add_refIons)
         self.btn_search_ref_ion.clicked.connect(self.search_ref_ion_info)
@@ -514,6 +549,22 @@ class FastLargeDataPlotter(QMainWindow):
         if file_path:
             self.linedit_refFile.setText(file_path)
 
+    def select_specFile(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select .npz spec file", './', "NPZ Files (*.npz);;All Files (*)")
+        if file_path:
+            self.linedit_specFile.setText(file_path)
+
+    def update_spec_plot(self):
+        if self.spec_freq is None or self.spec_psd is None:
+            return
+        if self.cb_spec_log.isChecked():
+            y_val = np.log10(np.clip(self.spec_psd, 1e-16, None))
+            self.p_spec.setLabel('left', 'PSD (log10)')
+        else:
+            y_val = self.spec_psd
+            self.p_spec.setLabel('left', 'PSD')
+        self.curve_spec.setData(self.spec_freq, y_val)
+
     def load_data(self):
         self.btn_fileLoad.setEnabled(False)
         self.btn_fileLoad.setText('Loading files ...')
@@ -540,6 +591,18 @@ class FastLargeDataPlotter(QMainWindow):
             
             self.df_ref.columns = self.df_ref.columns.str.replace(r"\s*\(.*?\)", "", regex=True)
             self.current_ion_brushes = None
+
+            # 加载可选的 Spec file (.npz)
+            spec_path = self.linedit_specFile.text().strip()
+            if spec_path:
+                with np.load(spec_path) as spec_data:
+                    self.spec_freq = np.asarray(spec_data['frequencies'])
+                    self.spec_psd = np.asarray(spec_data['psd'])
+                self.update_spec_plot()
+            else:
+                self.spec_freq = None
+                self.spec_psd = None
+                self.curve_spec.setData([], [])
 
             self.refresh_completers()
             self.plot_reference_lines()
@@ -943,7 +1006,6 @@ class FastLargeDataPlotter(QMainWindow):
 
             ion_color = ion_color_map.get(ion_name, pg.mkColor('w'))
 
-            # 将 harmonic 统一安全转换为纯整数 int
             harmonics_clean = []
             for h in df_sub['harmonic'].dropna().values:
                 try:
@@ -952,10 +1014,8 @@ class FastLargeDataPlotter(QMainWindow):
                     pass
             unique_h_list = sorted(list(set(harmonics_clean)))
 
-            # 如果解析出了有效的不同谐波分组
             if len(unique_h_list) > 0:
                 for h in unique_h_list:
-                    # 使用数值容差匹配，解决 float vs int 的不匹配问题
                     _df_sub = df_sub[df_sub['harmonic'].apply(
                         lambda x: pd.notna(x) and int(round(float(x))) == h if str(x).replace('.','',1).isdigit() else False
                     )]
@@ -970,7 +1030,6 @@ class FastLargeDataPlotter(QMainWindow):
                     self.p_main.addItem(text_item)
                     self.dynamic_labels.append(text_item)
             else:
-                # 若无任何谐波标定，整个离子团只绘制一个整体中心标签
                 x_center = df_sub['peak_pos'].mean()
                 y_position = df_sub['height_ion'].min()
 
@@ -1194,7 +1253,6 @@ class FastLargeDataPlotter(QMainWindow):
     def gmm_end(self, possible_ion_range, possible_harmonic_range):
         self.df_data['ion'] = possible_ion_range
         
-        # 保证 harmonic 为干净的 int/NaN 混合类型
         cleaned_h = []
         for val in possible_harmonic_range:
             try:
