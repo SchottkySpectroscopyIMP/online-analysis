@@ -1150,8 +1150,8 @@ class FastLargeDataPlotter(QMainWindow):
 
     def plot_data(self):
         times = self.df_data['exist_time'].values
-        t_min = times.min() if len(times) > 0 else 0.0
-        t_max = times.max() if len(times) > 0 else 2.9
+        t_min = float(times.min()) if len(times) > 0 else 0.0
+        t_max = float(times.max()) if len(times) > 0 else 2.9
         if t_max == t_min:
             t_max = t_min + 1e-5
 
@@ -1183,7 +1183,7 @@ class FastLargeDataPlotter(QMainWindow):
                 self.colorbar = pg.ColorBarItem(values=(t_min, t_max), colorMap=self.pg_cmap, label='Exist Time (s)')
             except TypeError:
                 self.colorbar = pg.ColorBarItem(values=(t_min, t_max), cmap=self.pg_cmap, label='Exist Time (s)')
-            
+
             if hasattr(self.colorbar, 'setPlot'):
                 self.colorbar.setPlot(self.p_main)
             else:
@@ -1191,7 +1191,7 @@ class FastLargeDataPlotter(QMainWindow):
                     self.colorbar.setImageItem(None, insertIn=self.p_main)
                 except TypeError:
                     self.win.addItem(self.colorbar, row=0, col=2)
-            
+
             self.colorbar.sigLevelsChanged.connect(self.on_colorbar_levels_changed)
         else:
             self.colorbar.setLevels((t_min, t_max))
@@ -1205,14 +1205,18 @@ class FastLargeDataPlotter(QMainWindow):
         self.p_main.scene().sigMouseMoved.connect(self.on_mouse_moved)
 
     def on_t_spin_changed(self):
-        """当右侧 Exist Time 输入框数值改变时，同步更新 ColorBar 的上下限"""
         if not hasattr(self, 'colorbar'):
             return
         t_min = self.spin_t_min.value()
         t_max = self.spin_t_max.value()
         if t_max <= t_min:
             t_max = t_min + 1e-5
+
+        self.colorbar.blockSignals(True)
         self.colorbar.setLevels((t_min, t_max))
+        self.colorbar.blockSignals(False)
+
+        self.on_colorbar_levels_changed()
 
     def on_colorbar_levels_changed(self):
         if not hasattr(self, 'df_data') or self.df_data is None or self.df_data.empty:
@@ -1222,7 +1226,6 @@ class FastLargeDataPlotter(QMainWindow):
         if c_max == c_min:
             c_max = c_min + 1e-5
 
-        # 同步更新右侧输入框数值（阻断信号避免循环触发）
         self.spin_t_min.blockSignals(True)
         self.spin_t_max.blockSignals(True)
         self.spin_t_min.setValue(float(c_min))
