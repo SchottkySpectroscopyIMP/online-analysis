@@ -432,6 +432,27 @@ class FastLargeDataPlotter(QMainWindow):
 
         file_layout.addLayout(q_control_layout, 10, 0, 1, 2)
 
+        # --- 新增第 11 行：Exist Time ColorBar 范围控制 ---
+        t_control_layout = QHBoxLayout()
+        t_control_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.spin_t_min = QDoubleSpinBox()
+        self.spin_t_min.setRange(-1e6, 1e6)
+        self.spin_t_min.setDecimals(3)
+        self.spin_t_min.setSingleStep(0.1)
+
+        self.spin_t_max = QDoubleSpinBox()
+        self.spin_t_max.setRange(-1e6, 1e6)
+        self.spin_t_max.setDecimals(3)
+        self.spin_t_max.setSingleStep(0.1)
+
+        t_control_layout.addWidget(QLabel("Exist Time min:"))
+        t_control_layout.addWidget(self.spin_t_min)
+        t_control_layout.addWidget(QLabel("max:"))
+        t_control_layout.addWidget(self.spin_t_max)
+
+        file_layout.addLayout(t_control_layout, 11, 0, 1, 2)
+
         file_group.setLayout(file_layout)
         layout.addWidget(file_group, 0, 1)
 
@@ -448,6 +469,9 @@ class FastLargeDataPlotter(QMainWindow):
         self.spin_q_min.valueChanged.connect(self.on_q_spin_min_changed)
         self.spin_q_max.valueChanged.connect(self.on_q_spin_max_changed)
         self.radio_q_filter.toggled.connect(self.on_q_filter_toggled)
+
+        self.spin_t_min.valueChanged.connect(self.on_t_spin_changed)
+        self.spin_t_max.valueChanged.connect(self.on_t_spin_changed)
 
         control_group = QGroupBox("Bins Control")
         control_layout = QGridLayout()
@@ -1180,6 +1204,16 @@ class FastLargeDataPlotter(QMainWindow):
         self.p_main.addItem(self.h_line, ignoreBounds=True)
         self.p_main.scene().sigMouseMoved.connect(self.on_mouse_moved)
 
+    def on_t_spin_changed(self):
+        """当右侧 Exist Time 输入框数值改变时，同步更新 ColorBar 的上下限"""
+        if not hasattr(self, 'colorbar'):
+            return
+        t_min = self.spin_t_min.value()
+        t_max = self.spin_t_max.value()
+        if t_max <= t_min:
+            t_max = t_min + 1e-5
+        self.colorbar.setLevels((t_min, t_max))
+
     def on_colorbar_levels_changed(self):
         if not hasattr(self, 'df_data') or self.df_data is None or self.df_data.empty:
             return
@@ -1187,6 +1221,14 @@ class FastLargeDataPlotter(QMainWindow):
         c_min, c_max = self.colorbar.levels()
         if c_max == c_min:
             c_max = c_min + 1e-5
+
+        # 同步更新右侧输入框数值（阻断信号避免循环触发）
+        self.spin_t_min.blockSignals(True)
+        self.spin_t_max.blockSignals(True)
+        self.spin_t_min.setValue(float(c_min))
+        self.spin_t_max.setValue(float(c_max))
+        self.spin_t_min.blockSignals(False)
+        self.spin_t_max.blockSignals(False)
 
         times = self.df_data['exist_time'].values
         norm_times = np.clip((times - c_min) / (c_max - c_min), 0.0, 1.0)
